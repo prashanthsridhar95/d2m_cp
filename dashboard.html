@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>D2M Control Panel</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #f4f4f6;
+    --card-bg: #ffffff;
+    --border: rgba(0,0,0,0.08);
+    --text: #1c1c1e;
+    --muted: #6e6e73;
+    --accent: #0a84ff;
+    --green: #30d158;
+    --yellow: #ffd60a;
+    --red: #ff453a;
+    --gray: #98989d;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  header {
+    padding: 28px 32px 8px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  main {
+    padding: 16px 32px 40px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    max-width: 1100px;
+  }
+  @media (max-width: 820px) {
+    main { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .service-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    box-shadow: 0 0 0 3px transparent;
+    transition: background 0.2s;
+  }
+  .dot.healthy { background: var(--green); box-shadow: 0 0 0 3px rgba(48,209,88,0.15); }
+  .dot.starting { background: var(--yellow); animation: pulse 1s infinite; }
+  .dot.degraded { background: var(--yellow); }
+  .dot.running_unmanaged { background: var(--accent); }
+  .dot.stopped { background: var(--gray); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .state-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .meta {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 6px 0 14px;
+  }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+
+  .buttons { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  button {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 14px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: #f2f2f5;
+    color: var(--text);
+    cursor: pointer;
+    transition: background 0.12s, transform 0.06s;
+  }
+  button:hover { background: #e8e8ec; }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.45; cursor: default; transform: none; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  button.primary:hover { background: #0a74e0; }
+  button.danger { background: #fdecea; color: #b3261e; border-color: transparent; }
+  button.danger:hover { background: #fbdcd9; }
+
+  .log {
+    background: #1c1c1e;
+    color: #d6d6d8;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.55;
+    height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log-empty { color: #666; font-style: italic; }
+
+  .actions-card { grid-column: 1 / -1; }
+  .actions-grid {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .activity-label {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .spinner {
+    width: 11px; height: 11px;
+    border: 2px solid rgba(10,132,255,0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  footer {
+    padding: 0 32px 32px;
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+
+  .accounts-card { grid-column: 1 / -1; }
+  .accounts-card .card-header { margin-bottom: 14px; }
+  .search-input {
+    font-family: inherit;
+    font-size: 13px;
+    padding: 7px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: #f2f2f5;
+    width: 220px;
+    outline: none;
+  }
+  .search-input:focus { border-color: var(--accent); background: #fff; }
+
+  .accounts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 820px) {
+    .accounts-grid { grid-template-columns: 1fr; }
+  }
+  .accounts-col h3 {
+    margin: 0 0 8px;
+    font-size: 12.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+  }
+  table.accounts-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  table.accounts-table th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  table.accounts-table td {
+    padding: 6px 6px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  table.accounts-table tr:last-child td { border-bottom: none; }
+  .acct-name { font-weight: 600; }
+  .acct-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    cursor: default;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+  }
+  .badge.yes { background: rgba(48,209,88,0.15); color: #1c7a34; }
+  .badge.no { background: rgba(152,152,157,0.18); color: var(--muted); }
+  .copy-btn {
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 7px;
+  }
+  .copy-btn + .copy-btn { margin-left: 6px; }
+  .acct-link-ok {
+    font-size: 11px;
+    color: #1c7a34;
+    font-weight: 600;
+  }
+  .accounts-empty, .accounts-error {
+    font-size: 13px;
+    color: var(--muted);
+    font-style: italic;
+    padding: 8px 2px;
+  }
+  .accounts-error { color: #b3261e; }
+
+  .danger-card { border-color: rgba(255,69,58,0.3); }
+  .danger-card .meta { margin-bottom: 14px; }
+  #reset-msg {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .match-inputs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .match-direction { margin-bottom: 16px; }
+  .match-direction:last-child { margin-bottom: 0; }
+  .match-direction h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .match-check {
+    font-size: 12px;
+    padding: 3px 0;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .match-check .mark { width: 12px; flex-shrink: 0; font-weight: 700; }
+  .match-check.pass .mark { color: #1c7a34; }
+  .match-check.fail .mark { color: #b3261e; }
+  .match-check .check-name { flex-shrink: 0; }
+  .match-check .values { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>D2M Control Panel</h1>
+    <p>Backend, frontend, and messaging dev servers for the D2M matrimony platform, in one place.</p>
+  </header>
+
+  <main>
+    <section class="card" id="backend-card">
+      <div class="card-header">
+        <div class="service-title">
+          <span class="dot stopped" id="backend-dot"></span>
+          <span>Backend API</span>
+        </div>
+        <span class="state-label" id="backend-state">—</span>
+      </div>
+      <div class="meta" id="backend-meta">127.0.0.1:8000</div>
+      <div class="buttons">
+        <button class="primary" onclick="callAction('/api/backend/start', 'backend-msg')">Start</button>
+        <button onclick="callAction('/api/backend/restart', 'backend-msg')">Restart</button>
+        <button class="danger" onclick="callAction('/api/backend/stop', 'backend-msg')">Stop</button>
+        <button onclick="window.open('http://127.0.0.1:8000/docs', '_blank')">API Docs ↗</button>
+      </div>
+      <div class="log" id="backend-log"><span class="log-empty">No output yet.</span></div>
+    </section>
+
+    <section class="card" id="frontend-card">
+      <div class="card-header">
+        <div class="service-title">
+          <span class="dot stopped" id="frontend-dot"></span>
+          <span>Frontend (Vite)</span>
+        </div>
+        <span class="state-label" id="frontend-state">—</span>
+      </div>
+      <div class="meta" id="frontend-meta">127.0.0.1:5173</div>
+      <div class="buttons">
+        <button class="primary" onclick="callAction('/api/frontend/start', 'frontend-msg')">Start</button>
+        <button onclick="callAction('/api/frontend/restart', 'frontend-msg')">Restart</button>
+        <button class="danger" onclick="callAction('/api/frontend/stop', 'frontend-msg')">Stop</button>
+        <button onclick="window.open('http://127.0.0.1:5173', '_blank')">Open App ↗</button>
+      </div>
+      <div class="log" id="frontend-log"><span class="log-empty">No output yet.</span></div>
+    </section>
+
+    <section class="card" id="messaging-card">
+      <div class="card-header">
+        <div class="service-title">
+          <span class="dot stopped" id="messaging-dot"></span>
+          <span>Messaging Server</span>
+        </div>
+        <span class="state-label" id="messaging-state">—</span>
+      </div>
+      <div class="meta" id="messaging-meta">127.0.0.1:4000</div>
+      <div class="meta">Needs its infra (Postgres/Redis/coturn) up first -- see the Docker buttons below.</div>
+      <div class="buttons">
+        <button class="primary" onclick="callAction('/api/messaging/start')">Start</button>
+        <button onclick="callAction('/api/messaging/restart')">Restart</button>
+        <button class="danger" onclick="callAction('/api/messaging/stop')">Stop</button>
+        <button onclick="window.open('http://127.0.0.1:4000/health', '_blank')">Health ↗</button>
+      </div>
+      <div class="log" id="messaging-log"><span class="log-empty">No output yet.</span></div>
+    </section>
+
+    <section class="card actions-card" id="live-card">
+      <div class="card-header">
+        <div class="service-title">
+          <span class="dot stopped" id="cloudflared-dot"></span>
+          <span>Public Demo Link</span>
+        </div>
+        <span class="state-label" id="cloudflared-state">—</span>
+      </div>
+      <div class="meta">
+        One button: brings up messaging's Docker infra, starts backend/messaging/frontend if they aren't
+        running, points the frontend at your public hostnames, and starts the Cloudflare Tunnel. "Stop public
+        access" only tears the tunnel + public URLs back down -- your local dev servers keep running.
+        Progress streams into the Quick actions log below.
+      </div>
+      <div class="buttons">
+        <button class="primary" onclick="callAction('/api/go-live')">Go live</button>
+        <button class="danger" onclick="callAction('/api/go-local')">Stop public access</button>
+      </div>
+      <div class="meta" id="cloudflared-meta">—</div>
+      <div class="meta" id="live-link-meta">Not live.</div>
+      <div class="log" id="cloudflared-log"><span class="log-empty">No output yet.</span></div>
+    </section>
+
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Quick actions</span></div>
+      </div>
+      <div class="actions-grid">
+        <button onclick="callAction('/api/action/install_backend', 'activity-msg')">Install backend deps</button>
+        <button onclick="callAction('/api/action/install_frontend', 'activity-msg')">Install frontend deps</button>
+        <button onclick="callAction('/api/action/seed', 'activity-msg')">Seed demo data</button>
+        <button onclick="callAction('/api/action/test', 'activity-msg')">Run backend tests</button>
+        <button onclick="callAction('/api/action/messaging_infra_up', 'activity-msg')">Start messaging infra (Docker)</button>
+        <button onclick="callAction('/api/action/messaging_infra_down', 'activity-msg')">Stop messaging infra (Docker)</button>
+        <button class="primary" onclick="gitPushAll()">Push all changes to git ↗</button>
+      </div>
+      <div class="activity-label" id="activity-label">Idle.</div>
+      <div class="log" id="activity-log"><span class="log-empty">Nothing run yet.</span></div>
+    </section>
+
+    <section class="card actions-card accounts-card">
+      <div class="card-header">
+        <div class="service-title"><span>Accounts</span></div>
+        <input class="search-input" id="accounts-search" type="text" placeholder="Search name or id…" oninput="renderAccounts()" />
+      </div>
+      <div class="accounts-grid">
+        <div class="accounts-col">
+          <h3>Parents (Sponsors)</h3>
+          <table class="accounts-table">
+            <thead><tr><th>Name</th><th>ID</th><th>Has child</th><th></th></tr></thead>
+            <tbody id="sponsors-tbody"></tbody>
+          </table>
+        </div>
+        <div class="accounts-col">
+          <h3>Children (Primaries)</h3>
+          <table class="accounts-table">
+            <thead><tr><th>Name</th><th>ID</th><th>Parent</th><th>Profile</th><th></th></tr></thead>
+            <tbody id="primaries-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Why don't they match?</span></div>
+      </div>
+      <div class="meta">Paste two Primary ids (see the Accounts table above) to see exactly which hard-filter check each direction passes or fails. Suggestions require mutual eligibility now -- a pair only shows up in either Discover feed if both sides' criteria independently accept the other, so this tells you which side (and which check) is the blocker.</div>
+      <div class="match-inputs">
+        <input class="search-input" id="match-a" type="text" placeholder="Primary A id" style="width: 260px;" />
+        <input class="search-input" id="match-b" type="text" placeholder="Primary B id" style="width: 260px;" />
+        <button onclick="runMatchDiagnostic()">Check</button>
+      </div>
+      <div id="match-result"></div>
+    </section>
+
+    <section class="card actions-card danger-card">
+      <div class="card-header">
+        <div class="service-title"><span>Danger zone</span></div>
+      </div>
+      <div class="meta">Permanently deletes every sponsor, primary, match, and thread in the local dev database. Cannot be undone.</div>
+      <div class="buttons">
+        <button class="danger" onclick="resetData(this)">Reset all data</button>
+      </div>
+      <div id="reset-msg"></div>
+    </section>
+  </main>
+
+  <footer id="paths-footer"></footer>
+
+<script>
+const STATE_LABELS = {
+  healthy: "Running",
+  degraded: "Running (unhealthy)",
+  starting: "Starting…",
+  running_unmanaged: "Running (external)",
+  stopped: "Stopped",
+};
+
+function renderLog(el, lines) {
+  if (!lines || lines.length === 0) {
+    el.innerHTML = '<span class="log-empty">No output yet.</span>';
+    return;
+  }
+  const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+  el.textContent = lines.join("\n");
+  if (atBottom) el.scrollTop = el.scrollHeight;
+}
+
+function renderService(prefix, data) {
+  document.getElementById(`${prefix}-dot`).className = `dot ${data.state}`;
+  document.getElementById(`${prefix}-state`).textContent = STATE_LABELS[data.state] || data.state;
+  const pidPart = data.pid ? ` · pid ${data.pid}` : "";
+  document.getElementById(`${prefix}-meta`).textContent = `${data.url}${pidPart}`;
+  renderLog(document.getElementById(`${prefix}-log`), data.log_tail);
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/status");
+    const data = await res.json();
+    renderService("backend", data.backend);
+    renderService("frontend", data.frontend);
+    renderService("messaging", data.messaging);
+    renderService("cloudflared", data.cloudflared);
+
+    const liveLinkMeta = document.getElementById("live-link-meta");
+    if (data.cloudflared.state === "healthy" || data.cloudflared.state === "running_unmanaged") {
+      const url = `https://${data.public.app}`;
+      liveLinkMeta.innerHTML = `Live at <a href="${url}" target="_blank">${url}</a> ` +
+        `<button class="copy-btn" onclick="copyToClipboard('${url}', this)">Copy link</button>`;
+    } else {
+      liveLinkMeta.textContent = "Not live.";
+    }
+
+    const activityLabel = document.getElementById("activity-label");
+    if (data.activity.running) {
+      activityLabel.innerHTML = `<span class="spinner"></span> ${data.activity.label}…`;
+    } else {
+      activityLabel.textContent = data.activity.label ? `Last run: ${data.activity.label}` : "Idle.";
+    }
+    renderLog(document.getElementById("activity-log"), data.activity.log);
+
+    document.getElementById("paths-footer").textContent =
+      `Backend: ${data.paths.backend}  ·  Frontend: ${data.paths.frontend}  ·  Messaging: ${data.paths.messaging}`;
+  } catch (e) {
+    // control panel server itself is down -- unlikely since we're loaded
+    // from it, but fail quietly rather than spamming the console.
+  }
+}
+
+async function callAction(path) {
+  try {
+    await fetch(path, { method: "POST" });
+  } finally {
+    setTimeout(refresh, 300);
+  }
+}
+
+// Confirms first -- unlike the other quick actions, this one pushes to a
+// real GitHub remote (see control_panel.py's git_push_all docstring), so
+// a misclick shouldn't silently commit + push whatever's sitting
+// uncommitted in either repo.
+async function gitPushAll() {
+  const sure = confirm(
+    "This commits (with an auto-generated message) and pushes whatever's uncommitted in the backend, frontend, AND messaging-framework repos to their GitHub remotes.\n\nContinue?"
+  );
+  if (!sure) return;
+  await callAction("/api/action/git_push");
+}
+
+// ---- Accounts console -------------------------------------------------
+// Name-against-id lookup for sponsors/primaries, sourced from the
+// backend's dev-only GET /admin/accounts via the control panel's own
+// /api/accounts proxy (see control_panel.py's fetch_accounts()). Exists
+// because there's no real login yet -- "signing in" as an account means
+// knowing its id, and this is the only place to find one without digging
+// through seed.py output or the DB directly.
+
+let accountsData = null;
+
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = value == null ? "" : String(value);
+  return div.innerHTML;
+}
+
+function matchesSearch(term, ...fields) {
+  if (!term) return true;
+  const t = term.toLowerCase();
+  return fields.some((f) => (f || "").toLowerCase().includes(t));
+}
+
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const original = btn.textContent;
+    btn.textContent = "Copied";
+    btn.disabled = true;
+    setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1000);
+  });
+}
+
+// Recovers a sponsor's claim link when it's been lost client-side (the
+// onboarding handoff screen only ever shows it once -- no login layer
+// means there's no other way to see it again). Backend re-signs the
+// still-active invite when there is one, or mints a fresh one otherwise
+// (see app/services/onboarding_service.get_or_reissue_invite).
+async function getInviteLink(sponsorId, btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Getting…";
+  let data;
+  try {
+    const res = await fetch(`/api/invite-link/${sponsorId}`, { method: "POST" });
+    data = await res.json();
+  } catch (e) {
+    data = { error: "Control panel couldn't reach the backend." };
+  }
+
+  if (data.error) {
+    btn.textContent = "Failed";
+    btn.title = data.error;
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.disabled = false;
+      btn.title = "";
+    }, 2500);
+    return;
+  }
+
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(data.claim_url);
+    copied = true;
+  } catch (e) {
+    // clipboard API unavailable -- the link is still shown below via title
+  }
+
+  const cell = btn.closest("td");
+  cell.innerHTML = `<span class="acct-link-ok" title="${escapeHtml(data.claim_url)}">${copied ? "Link copied ✓" : "Ready -- hover to see it"}</span>`;
+}
+
+function renderAccounts() {
+  const sTbody = document.getElementById("sponsors-tbody");
+  const pTbody = document.getElementById("primaries-tbody");
+  const term = document.getElementById("accounts-search").value.trim();
+
+  if (!accountsData) {
+    sTbody.innerHTML = '<tr><td colspan="4"><div class="accounts-empty">Loading…</div></td></tr>';
+    pTbody.innerHTML = '<tr><td colspan="5"><div class="accounts-empty">Loading…</div></td></tr>';
+    return;
+  }
+  if (accountsData.error) {
+    sTbody.innerHTML = `<tr><td colspan="4"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
+    pTbody.innerHTML = `<tr><td colspan="5"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
+    return;
+  }
+
+  const sponsors = (accountsData.sponsors || []).filter((s) => matchesSearch(term, s.name, s.sponsor_id));
+  const primaries = (accountsData.primaries || []).filter((p) =>
+    matchesSearch(term, p.name, p.primary_id, p.sponsor_name));
+
+  sTbody.innerHTML = sponsors.length
+    ? sponsors.map((s) => `
+      <tr>
+        <td class="acct-name">${escapeHtml(s.name)}</td>
+        <td class="acct-id" title="${escapeHtml(s.sponsor_id)}">${escapeHtml(s.sponsor_id.slice(0, 8))}…</td>
+        <td>${s.has_child ? '<span class="badge yes">Yes</span>' : '<span class="badge no">No</span>'}</td>
+        <td>
+          <button class="copy-btn" onclick="copyToClipboard('${s.sponsor_id}', this)">Copy ID</button>
+          ${s.has_child ? "" : `<button class="copy-btn" onclick="getInviteLink('${s.sponsor_id}', this)">Get link</button>`}
+        </td>
+      </tr>`).join("")
+    : `<tr><td colspan="4"><div class="accounts-empty">${term ? "No matches." : "No sponsors yet -- seed demo data or onboard one."}</div></td></tr>`;
+
+  pTbody.innerHTML = primaries.length
+    ? primaries.map((p) => `
+      <tr>
+        <td class="acct-name">${escapeHtml(p.name)}</td>
+        <td class="acct-id" title="${escapeHtml(p.primary_id)}">${escapeHtml(p.primary_id.slice(0, 8))}…</td>
+        <td>${escapeHtml(p.sponsor_name)}</td>
+        <td>${p.profile_completed ? '<span class="badge yes">Complete</span>' : '<span class="badge no">Incomplete</span>'}</td>
+        <td><button class="copy-btn" onclick="copyToClipboard('${p.primary_id}', this)">Copy</button></td>
+      </tr>`).join("")
+    : `<tr><td colspan="5"><div class="accounts-empty">${term ? "No matches." : "No children yet -- redeem an invite."}</div></td></tr>`;
+}
+
+async function refreshAccounts() {
+  try {
+    const res = await fetch("/api/accounts");
+    accountsData = await res.json();
+  } catch (e) {
+    accountsData = { error: "Control panel couldn't reach the backend." };
+  }
+  renderAccounts();
+}
+
+function renderMatchDirection(label, direction) {
+  const status = direction.would_appear_in_discover
+    ? '<span class="badge yes">Would appear in Discover</span>'
+    : '<span class="badge no">Would NOT appear in Discover</span>';
+
+  // Astrology is stage 2 of the real pipeline -- only ever computed for a
+  // pair that already cleared BOTH sides' hard filters (mutuality gate).
+  // The backend now computes it fresh for this diagnostic regardless, so
+  // it's always shown here -- explicitly, not just when there's something
+  // wrong -- otherwise "no dealbreakers" and "never checked" look
+  // identical, which is exactly what was confusing before.
+  let astrologyLine;
+  if (!direction.astrology_computed) {
+    astrologyLine = `
+      <div class="match-check">
+        <span class="mark" style="color: var(--gray);">?</span>
+        <span class="check-name">astrology_compatibility</span>
+        <span class="values">couldn't compute -- a chart is likely still missing for one side</span>
+      </div>`;
+  } else {
+    const clean = !direction.astrology_dealbreakers || direction.astrology_dealbreakers.length === 0;
+    astrologyLine = `
+      <div class="match-check ${clean ? "pass" : "fail"}">
+        <span class="mark">${clean ? "✓" : "✗"}</span>
+        <span class="check-name">astrology_no_dealbreakers</span>
+        <span class="values">${clean ? "computed -- none found" : "computed -- " + escapeHtml(JSON.stringify(direction.astrology_dealbreakers))}</span>
+      </div>`;
+  }
+
+  const rows = direction.checks.map((c) => {
+    const vals = [];
+    if (c.viewer_value !== null && c.viewer_value !== undefined) vals.push(`viewer: ${JSON.stringify(c.viewer_value)}`);
+    if (c.candidate_value !== null && c.candidate_value !== undefined) vals.push(`candidate: ${JSON.stringify(c.candidate_value)}`);
+    return `
+      <div class="match-check ${c.passed ? "pass" : "fail"}">
+        <span class="mark">${c.passed ? "✓" : "✗"}</span>
+        <span class="check-name">${escapeHtml(c.check)}</span>
+        <span class="values">${escapeHtml(vals.join("  ·  "))}</span>
+      </div>`;
+  }).join("");
+  return `<div class="match-direction"><h4>${label} ${status}</h4>${rows}${astrologyLine}</div>`;
+}
+
+async function runMatchDiagnostic() {
+  const a = document.getElementById("match-a").value.trim();
+  const b = document.getElementById("match-b").value.trim();
+  const resultEl = document.getElementById("match-result");
+  if (!a || !b) {
+    resultEl.innerHTML = '<div class="accounts-error">Enter both primary ids.</div>';
+    return;
+  }
+  resultEl.innerHTML = '<div class="accounts-empty">Checking…</div>';
+  try {
+    const res = await fetch(`/api/match-diagnostic/${encodeURIComponent(a)}/${encodeURIComponent(b)}`);
+    const data = await res.json();
+    if (data.error) {
+      resultEl.innerHTML = `<div class="accounts-error">${escapeHtml(data.error)}</div>`;
+      return;
+    }
+    resultEl.innerHTML =
+      renderMatchDirection("A → B (does A see B?)", data.a_to_b) +
+      renderMatchDirection("B → A (does B see A?)", data.b_to_a);
+  } catch (e) {
+    resultEl.innerHTML = '<div class="accounts-error">Couldn\'t reach the control panel.</div>';
+  }
+}
+
+async function resetData(btn) {
+  const sure = confirm(
+    "This permanently deletes every sponsor, primary, match, and thread in the local dev database. This cannot be undone.\n\nContinue?"
+  );
+  if (!sure) return;
+
+  const original = btn.textContent;
+  const msgEl = document.getElementById("reset-msg");
+  btn.disabled = true;
+  btn.textContent = "Resetting…";
+  msgEl.textContent = "";
+
+  try {
+    const res = await fetch("/api/reset-data", { method: "POST" });
+    const data = await res.json();
+    msgEl.textContent = data.message;
+  } catch (e) {
+    msgEl.textContent = "Couldn't reach the control panel.";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+    refresh();
+    refreshAccounts();
+  }
+}
+
+refresh();
+refreshAccounts();
+setInterval(refresh, 2000);
+setInterval(refreshAccounts, 4000);
+</script>
+</body>
+</html>
