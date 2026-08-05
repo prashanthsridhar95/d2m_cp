@@ -66,6 +66,44 @@ PUBLIC_HOSTNAME_MSG = "chat.prashanthsridhar.com"
 PUBLIC_HOSTNAME_API = "api.prashanthsridhar.com"
 PUBLIC_HOSTNAME_APP = "app.prashanthsridhar.com"
 
+# The backend (app/config.py) defaults its CORS allowlist to just the local
+# Vite dev origins (localhost:5173 / 127.0.0.1:5173) unless
+# D2M_CORS_ALLOWED_ORIGINS is set in its environment. uvicorn is always
+# launched as a *child* of this panel process (see backend_start_cmd() /
+# ManagedService.start()), which inherits whatever's in this process's own
+# environment -- so setting it here, once, at import time, means every
+# backend start from this panel (plain local dev or Go live) always allows
+# the public app hostname too, rather than that only being true on however
+# many terminal sessions someone happened to export it by hand in. Without
+# this, every backend restart the panel does silently regresses back to
+# CORS blocking https://app.prashanthsridhar.com -- surfaced as the
+# frontend's fetch calls failing with a generic network error (browsers
+# don't expose the real reason for a CORS failure to JS), e.g. login's
+# "Couldn't look that id up right now" for what was actually a CORS block,
+# not a real backend problem.
+os.environ.setdefault(
+    "D2M_CORS_ALLOWED_ORIGINS",
+    f"http://localhost:5173,http://127.0.0.1:5173,https://{PUBLIC_HOSTNAME_APP}",
+)
+
+# Same class of bug, same fix, for the messaging server -- its own
+# messaging-framework/.env has CORS_ORIGIN explicitly set (not left as the
+# wildcard "reflect any origin" default; see packages/server/src/config.ts)
+# to just the LAN dev origins. `tsx watch` auto-loads that .env file from
+# its cwd (which is MESSAGING_DIR, since that's where this panel starts it
+# from), and dotenv-style loaders don't override a var that's already
+# present in the process environment -- so setting it here first, before
+# the child is ever spawned, wins over the .env file's value rather than
+# fighting it. Preserves the existing LAN entry (192.168.1.41:5173) from
+# that file rather than clobbering it, and adds the public app hostname on
+# top -- surfaced as chat messages silently failing to load/send (blocked
+# key-bundle and message-sync fetches) with no indication in the UI that it
+# was a CORS problem rather than the messaging server being down.
+os.environ.setdefault(
+    "CORS_ORIGIN",
+    f"http://localhost:5173,http://127.0.0.1:5173,http://192.168.1.41:5173,https://{PUBLIC_HOSTNAME_APP}",
+)
+
 
 def _backend_python() -> str:
     """Prefer a venv inside the backend repo if one exists (the setup
@@ -92,6 +130,15 @@ class ManagedService:
         self.process: subprocess.Popen | None = None
         self.log_path = LOG_DIR / f"{name}.log"
         self.lock = threading.Lock()
+        # should_run tracks *intent*, for the watchdog below: True once
+        # something has asked this service to be up (start()), False once
+        # something has explicitly asked it to be down (stop()). The
+        # watchdog only ever acts on services where should_run is True but
+        # the OS-level process isn't there anymore -- e.g. it crashed on its
+        # own (an uncaught exception, a lost DB connection after Postgres
+        # restarts, cloudflared's own "accept stream listener" failures seen
+        # earlier) -- never on a service someone deliberately stopped.
+        self.should_run = False
 
     # -- health / status --
 
@@ -158,10 +205,29 @@ class ManagedService:
 
     def start(self, cmd: list[str], cwd: Path) -> str:
         with self.lock:
+            self.should_run = True
             if self.process is not None and self.process.poll() is None:
                 return f"{self.name} is already running (pid {self.process.pid})."
             if not cwd.exists():
                 return f"Can't start {self.name}: {cwd} doesn't exist."
+
+            # self.process is None here, but that only means *this object*
+            # never started anything -- e.g. right after the panel itself
+            # was restarted (a fresh Python process has no memory of pids
+            # it spawned last time), or after a crash. The actual OS
+            # process from before can still be alive and holding the port.
+            # Left alone, that produces exactly the bug this fixes: the new
+            # Popen below either fails to bind (tools using --strictPort)
+            # or -- worse, for something like cloudflared -- succeeds at
+            # first glance while a stale, orphaned instance goes on
+            # answering health checks and real traffic with whatever
+            # config/state it loaded at ITS OWN long-ago startup. Adopt and
+            # kill anything on the port first so every start() is
+            # idempotent regardless of how the panel got here. Only kills
+            # the specific pid(s) lsof reports, never a process group --
+            # see the identical safety note in stop().
+            for pid in self._port_owner_pids():
+                self._kill_single(pid)
 
             log_f = open(self.log_path, "a")
             log_f.write(f"\n----- starting at {time.strftime('%Y-%m-%d %H:%M:%S')} -----\n")
@@ -176,6 +242,7 @@ class ManagedService:
 
     def stop(self) -> str:
         with self.lock:
+            self.should_run = False
             killed_any = False
 
             if self.process is not None and self.process.poll() is None:
@@ -283,7 +350,33 @@ def backend_start_cmd() -> list[str]:
 
 
 def frontend_start_cmd() -> list[str]:
-    return ["npm", "run", "dev", "--", "--port", str(FRONTEND_PORT), "--strictPort"]
+    # --host 127.0.0.1 pins Vite to the IPv4 loopback explicitly. Without
+    # it, Vite binds whatever `localhost` resolves to via Node's own DNS
+    # resolution -- on newer Node versions that can land on ::1 (IPv6-only),
+    # so the server prints "Local: http://localhost:5173/" and looks fine,
+    # but nothing is actually listening on 127.0.0.1. That silently breaks
+    # both this panel's own health check (_http_check hits FRONTEND_URL =
+    # http://127.0.0.1:5173) and cloudflared's ingress rule for app.* (also
+    # points at 127.0.0.1/localhost:5173) -- surfaced as frontend being
+    # permanently stuck in "starting" during Go live even though the
+    # process was alive and had bound *a* socket successfully.
+    return ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", str(FRONTEND_PORT), "--strictPort"]
+
+
+def frontend_preview_cmd() -> list[str]:
+    """Serves the already-built dist/ (production, minified, code-split)
+    instead of running the dev server. Used only for the public demo link
+    (see _run_go_live) -- `vite dev` serves hundreds of individual
+    unbundled ES module files, which is fine on localhost (~1ms round
+    trips) but was the actual cause of the public link feeling slow: each
+    of those hundreds of file requests was paying a full Cloudflare Tunnel
+    round trip (tens of ms) instead of one. `vite preview` serves the same
+    single minified, gzippable bundle a real deployment would.
+
+    --host 127.0.0.1 -- see frontend_start_cmd()'s comment; same IPv4-vs-
+    IPv6 binding gap applies here, and matters more for this one since it's
+    what the public tunnel and the panel's own health check both depend on."""
+    return ["npx", "vite", "preview", "--host", "127.0.0.1", "--port", str(FRONTEND_PORT), "--strictPort"]
 
 
 def messaging_start_cmd() -> list[str]:
@@ -298,10 +391,23 @@ def cloudflared_start_cmd() -> list[str]:
 
 def _ensure_cloudflared_config() -> tuple[bool, str]:
     """Idempotently makes sure config.yml's ingress list has an entry for
-    every hostname this app needs, pointed at the matching localhost port.
-    Only ever inserts missing ingress lines -- the `tunnel:` name and
+    every hostname this app needs, pointed at the matching port on
+    127.0.0.1 -- and, just as importantly, REWRITES any existing entry that
+    still says `localhost` instead of `127.0.0.1`. `tunnel:` name and
     `credentials-file:` path (which encode this one tunnel's UUID, created
-    by hand with `cloudflared tunnel create`) are left exactly as found."""
+    by hand with `cloudflared tunnel create`) are left exactly as found.
+
+    The localhost -> 127.0.0.1 normalization is the actual fix for
+    chat.prashanthsridhar.com's recurring "502 Bad Gateway": cloudflared
+    resolves the ingress rule's `service:` hostname itself, and on this Mac
+    "localhost" can resolve to the IPv6 loopback (::1) first -- the exact
+    same dual-stack ambiguity that made Vite bind to the wrong address
+    earlier (see frontend_start_cmd()'s comment) -- except here it's
+    cloudflared's own outbound connection to the origin that's affected,
+    not the origin's bind address, so pinning the origin to 127.0.0.1 (as
+    frontend/messaging both already do) doesn't fix it by itself. Pointing
+    the ingress rule itself at 127.0.0.1 removes the ambiguity at the one
+    place that actually matters."""
     if not CLOUDFLARED_CONFIG.exists():
         return False, (
             f"{CLOUDFLARED_CONFIG} doesn't exist. Create the tunnel once by hand first: "
@@ -310,28 +416,80 @@ def _ensure_cloudflared_config() -> tuple[bool, str]:
 
     text = CLOUDFLARED_CONFIG.read_text()
     required = [
-        (PUBLIC_HOSTNAME_MSG, f"http://localhost:{MESSAGING_PORT}"),
-        (PUBLIC_HOSTNAME_API, f"http://localhost:{BACKEND_PORT}"),
-        (PUBLIC_HOSTNAME_APP, f"http://localhost:{FRONTEND_PORT}"),
+        (PUBLIC_HOSTNAME_MSG, MESSAGING_PORT),
+        (PUBLIC_HOSTNAME_API, BACKEND_PORT),
+        (PUBLIC_HOSTNAME_APP, FRONTEND_PORT),
     ]
-    missing = [(h, s) for h, s in required if h not in text]
-    if not missing:
-        return True, "Tunnel config already covers all three hostnames."
+    notes = []
 
-    lines = text.splitlines()
-    insert_at = len(lines)
-    for i, line in enumerate(lines):
-        if "http_status:404" in line:
-            insert_at = i
-            break
-    new_lines = []
-    for hostname, service in missing:
-        new_lines.append(f"  - hostname: {hostname}")
-        new_lines.append(f"    service: {service}")
-    lines[insert_at:insert_at] = new_lines
-    CLOUDFLARED_CONFIG.write_text("\n".join(lines) + "\n")
-    added = ", ".join(h for h, _ in missing)
-    return True, f"Added to {CLOUDFLARED_CONFIG}: {added}"
+    # Normalize first -- fixes configs written by an earlier version of this
+    # panel (or edited by hand) that used `localhost` instead of
+    # `127.0.0.1`. Only touches the exact ports this app owns, so it can't
+    # clobber an unrelated ingress rule that happens to also say localhost.
+    for _hostname, port in required:
+        old = f"service: http://localhost:{port}"
+        new = f"service: http://127.0.0.1:{port}"
+        if old in text:
+            text = text.replace(old, new)
+            notes.append(f"normalized :{port} to 127.0.0.1")
+
+    missing = [(h, p) for h, p in required if h not in text]
+    if missing:
+        lines = text.splitlines()
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            if "http_status:404" in line:
+                insert_at = i
+                break
+        new_lines = []
+        for hostname, port in missing:
+            new_lines.append(f"  - hostname: {hostname}")
+            new_lines.append(f"    service: http://127.0.0.1:{port}")
+        lines[insert_at:insert_at] = new_lines
+        text = "\n".join(lines) + "\n"
+        notes.append("added: " + ", ".join(h for h, _ in missing))
+
+    if not notes:
+        return True, "Tunnel config already covers all three hostnames on 127.0.0.1."
+
+    CLOUDFLARED_CONFIG.write_text(text if text.endswith("\n") else text + "\n")
+    return True, f"Updated {CLOUDFLARED_CONFIG}: " + "; ".join(notes)
+
+
+def _cloudflared_cleanup(log) -> None:
+    """Purges any stale/orphaned connector registrations Cloudflare's edge
+    still has for this tunnel. This is the actual fix for the intermittent
+    "everything looks fine locally but the public hostname 404s" symptom:
+    cloudflared registers each run as its own Connector ID with Cloudflare's
+    edge (see its own startup log line "Generated Connector ID: ..."), and a
+    clean SIGTERM handles deregistering those -- but ManagedService.stop()
+    only waits ~2s before escalating to SIGKILL, and cloudflared can also
+    simply crash on its own (a "accept stream listener encountered a
+    failure" has been observed happening spontaneously, unrelated to
+    anything this panel did). Either way, a connector can be left registered
+    at the edge with nothing local backing it. The edge then load-balances
+    incoming requests for a hostname across ALL registered connectors,
+    including dead ones -- so some fraction of requests (or, worse, all of
+    them from a given edge PoP) get routed to a connector that can't serve
+    them, which surfaces as a plain "404 Not Found" straight from Cloudflare
+    (not a 502 -- the DNS/route level, not a backend failure), even though
+    `curl localhost:5173` and the current cloudflared process both look
+    completely healthy. Only ever call this with the LOCAL cloudflared
+    process already stopped (see the call sites in go_live/go_local below)
+    -- cleanup targets connections with no live process behind them, not
+    the one you're about to start.
+    """
+    log(f"Cleaning up any stale connector registrations for tunnel '{CLOUDFLARED_TUNNEL_NAME}'…")
+    try:
+        out = subprocess.run(
+            ["cloudflared", "tunnel", "cleanup", CLOUDFLARED_TUNNEL_NAME],
+            capture_output=True, text=True, timeout=20,
+        )
+        for stream in (out.stdout, out.stderr):
+            if stream and stream.strip():
+                log(stream.strip())
+    except Exception as e:
+        log(f"Couldn't run `cloudflared tunnel cleanup`: {e}")
 
 
 def _ensure_cloudflared_dns_routes(log) -> None:
@@ -491,7 +649,16 @@ ACTIONS = {
     # every other one-off action instead of silently gating Start.
     "messaging_infra_up": lambda: run_activity_async(
         "Start messaging infra (docker compose)",
-        ["docker", "compose", "up", "-d", "postgres", "redis", "coturn"], MESSAGING_DIR,
+        # --wait blocks until postgres/redis report healthy (both have a
+        # healthcheck in docker-compose.yml; coturn doesn't, so it's just
+        # waited-for as "started") rather than returning the instant the
+        # containers exist. Without it, "Running" doesn't mean "actually
+        # accepting connections yet" -- Postgres in particular takes a few
+        # seconds after container start to finish initializing, and the
+        # messaging server (started right after, outside Docker) would
+        # otherwise sometimes race it and crash on ECONNREFUSED before it
+        # ever got the chance to open its own port.
+        ["docker", "compose", "up", "-d", "--wait", "postgres", "redis", "coturn"], MESSAGING_DIR,
     ),
     "messaging_infra_down": lambda: run_activity_async(
         "Stop messaging infra (docker compose)",
@@ -515,6 +682,13 @@ ACTIONS = {
 # dashboard's existing "Quick actions" log panel is where this shows up.
 
 FRONTEND_ENV_PATH = FRONTEND_DIR / ".env"
+
+# Tracks which command the watchdog (see _watchdog_loop) should use to
+# revive the frontend if it dies: the production preview server while a
+# public demo link is live, the hot-reload dev server otherwise. Set at the
+# same two places _write_frontend_env's `public` argument is set, so it's
+# always in sync with what's actually in FRONTEND_ENV_PATH.
+_public_mode = False
 
 
 def _write_frontend_env(public: bool) -> None:
@@ -562,8 +736,12 @@ def _run_go_live() -> None:
 
     _activity_log("Starting messaging infra (docker compose)…")
     try:
+        # --wait -- see the identical comment on ACTIONS["messaging_infra_up"]
+        # above. This is the path that actually bit us: the messaging server
+        # gets started (outside Docker) right after this call returns, and
+        # without --wait it was racing Postgres's own startup and losing.
         out = subprocess.run(
-            ["docker", "compose", "up", "-d", "postgres", "redis", "coturn"],
+            ["docker", "compose", "up", "-d", "--wait", "postgres", "redis", "coturn"],
             cwd=str(MESSAGING_DIR), capture_output=True, text=True, timeout=60,
         )
         for stream in (out.stdout, out.stderr):
@@ -575,10 +753,50 @@ def _run_go_live() -> None:
     _activity_log(backend.start(backend_start_cmd(), BACKEND_DIR))
     _activity_log(messaging.start(messaging_start_cmd(), MESSAGING_DIR))
 
-    _activity_log("Pointing the frontend at the public URLs and restarting it…")
+    _activity_log("Pointing the frontend at the public URLs…")
     _write_frontend_env(public=True)
-    _activity_log(frontend.restart(frontend_start_cmd(), FRONTEND_DIR))
 
+    # Build + serve the production bundle instead of the dev server -- see
+    # frontend_preview_cmd()'s docstring. `npm run build` bakes the .env
+    # values just written into the bundle (Vite inlines VITE_* at build
+    # time), so this must happen after _write_frontend_env above, not
+    # before.
+    _activity_log("Building production bundle (this can take a little while)…")
+    try:
+        out = subprocess.run(
+            ["npm", "run", "build"], cwd=str(FRONTEND_DIR),
+            capture_output=True, text=True, timeout=180,
+        )
+        for stream in (out.stdout, out.stderr):
+            if stream and stream.strip():
+                _activity_log(stream.strip()[-2000:])
+        if out.returncode != 0:
+            _activity_log(f"Build failed (exit {out.returncode}) -- see output above. Not starting the preview server.")
+            with activity_lock:
+                activity_state["running"] = False
+            return
+    except Exception as e:
+        _activity_log(f"Couldn't run the build: {e}")
+        with activity_lock:
+            activity_state["running"] = False
+        return
+
+    _activity_log("Serving the production build…")
+    frontend.stop()
+    global _public_mode
+    _public_mode = True
+    _activity_log(frontend.start(frontend_preview_cmd(), FRONTEND_DIR))
+
+    # Always fully stop + cleanup before starting a fresh cloudflared, even
+    # if it looks like nothing's running -- see _cloudflared_cleanup's
+    # docstring for why a stale connector can be left registered at
+    # Cloudflare's edge with no local process behind it, and why that's the
+    # actual cause of "public hostname 404s even though localhost is fine."
+    # Cheap and idempotent when there's nothing to clean up, so this runs
+    # unconditionally on every Go live rather than only when something looks
+    # wrong.
+    _activity_log(cloudflared.stop())
+    _cloudflared_cleanup(_activity_log)
     _activity_log(cloudflared.start(cloudflared_start_cmd(), Path.home()))
 
     _activity_log("Waiting for everything to come up…")
@@ -614,7 +832,11 @@ def _run_go_local() -> None:
         activity_state["log"] = []
 
     _activity_log(cloudflared.stop())
+    _cloudflared_cleanup(_activity_log)
     _write_frontend_env(public=False)
+    global _public_mode
+    _public_mode = False
+    _activity_log("Switching the frontend back to the dev server (hot reload)…")
     _activity_log(frontend.restart(frontend_start_cmd(), FRONTEND_DIR))
     _activity_log("Public demo link is down. Backend, messaging, and frontend are still running locally.")
 
@@ -627,6 +849,105 @@ def go_local() -> str:
         return f"Already running: {activity_state['label']}"
     threading.Thread(target=_run_go_local, daemon=True).start()
     return "Started: Go local (stop public access)"
+
+
+# ---- Watchdog: auto-heal services that die on their own -------------------
+# Everything above (docker --wait, --host 127.0.0.1, the orphan-reclaim in
+# ManagedService.start(), the ingress localhost->127.0.0.1 normalization,
+# the tunnel-cleanup-before-start) removes *known* ways a service fails to
+# come up cleanly. None of it covers a service that comes up fine and then
+# dies later on its own -- a lost Postgres connection after a container
+# restart, an uncaught exception in the messaging server, cloudflared's own
+# "accept stream listener encountered a failure" crash (seen for real
+# earlier in this same setup). Nothing was watching for that: the service
+# would just sit there dead until someone happened to notice and click
+# Restart by hand -- which is exactly the "fails almost every single time"
+# experience being fixed here. This loop is the general fix: it doesn't
+# matter *why* a service died, only that something that should be running
+# no longer is.
+WATCHDOG_INTERVAL_S = 8
+WATCHDOG_MAX_CONSECUTIVE_RESTARTS = 5
+
+_watchdog_failure_counts: dict[str, int] = {}
+
+
+def _watchdog_targets() -> list[tuple[ManagedService, list[str], Path]]:
+    """Recomputed on every tick (rather than a static list) so the frontend
+    entry always uses whichever command matches the CURRENT mode (dev server
+    locally, preview server while a public demo link is live) -- a stale
+    static list would revive a crashed frontend into the wrong mode."""
+    return [
+        (backend, backend_start_cmd(), BACKEND_DIR),
+        (frontend, frontend_preview_cmd() if _public_mode else frontend_start_cmd(), FRONTEND_DIR),
+        (messaging, messaging_start_cmd(), MESSAGING_DIR),
+    ]
+
+
+def _watchdog_heal_cloudflared() -> None:
+    """cloudflared gets the same stop+cleanup+start sequence Go live/local
+    already use by hand -- not a plain restart -- since a crash is exactly
+    the case _cloudflared_cleanup exists for (a dead connector left
+    registered at Cloudflare's edge)."""
+    def log(line: str) -> None:
+        with open(cloudflared.log_path, "a") as f:
+            f.write(line + "\n")
+
+    log(f"[watchdog] cloudflared isn't running but should be -- cleaning up and restarting…")
+    cloudflared.stop()
+    _cloudflared_cleanup(log)
+    cloudflared.start(cloudflared_start_cmd(), Path.home())
+
+
+def _watchdog_loop() -> None:
+    while True:
+        time.sleep(WATCHDOG_INTERVAL_S)
+        try:
+            targets = _watchdog_targets()
+            if cloudflared.should_run:
+                targets = targets + [(cloudflared, [], Path.home())]  # cmd/cwd unused for cloudflared, see below
+
+            for svc, cmd, cwd in targets:
+                if not svc.should_run:
+                    continue
+                state = svc.status()["state"]
+                if state in ("healthy", "degraded", "running_unmanaged", "starting"):
+                    # Degraded/starting are transient or a different class of
+                    # problem (wrong response, still booting) -- the process
+                    # IS there, so this isn't the "silently died" case this
+                    # loop exists for. Any sign of life resets the backoff
+                    # counter, so a later, unrelated crash gets the full
+                    # retry budget again rather than inheriting an old streak.
+                    _watchdog_failure_counts[svc.name] = 0
+                    continue
+                if state != "stopped":
+                    continue
+
+                count = _watchdog_failure_counts.get(svc.name, 0)
+                if count >= WATCHDOG_MAX_CONSECUTIVE_RESTARTS:
+                    continue  # already logged the give-up message below once
+
+                count += 1
+                _watchdog_failure_counts[svc.name] = count
+                with open(svc.log_path, "a") as f:
+                    f.write(f"\n[watchdog] {svc.name} stopped unexpectedly -- "
+                            f"auto-restarting (attempt {count}/{WATCHDOG_MAX_CONSECUTIVE_RESTARTS})…\n")
+
+                if svc is cloudflared:
+                    _watchdog_heal_cloudflared()
+                else:
+                    svc.start(cmd, cwd)
+
+                if count == WATCHDOG_MAX_CONSECUTIVE_RESTARTS:
+                    with open(svc.log_path, "a") as f:
+                        f.write(f"[watchdog] {svc.name} has failed {count} restarts in a row -- "
+                                f"giving up auto-restarting it until it's healthy again or someone "
+                                f"restarts it by hand from the panel (check the log above for why "
+                                f"it keeps dying).\n")
+        except Exception as e:
+            # The watchdog itself must never take the panel down -- log to
+            # stderr (visible in the terminal running control_panel.py) and
+            # keep looping.
+            print(f"[watchdog] unexpected error: {e}")
 
 
 # ---- Push all changes to git -----------------------------------------------
@@ -928,6 +1249,7 @@ def main():
     print(f"D2M Control Panel running at {url}")
     print("Press Ctrl+C to stop the panel itself (backend/frontend you started keep running).")
     threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    threading.Thread(target=_watchdog_loop, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
