@@ -324,18 +324,41 @@
   .match-check.fail .mark { color: #b3261e; }
   .match-check .check-name { flex-shrink: 0; }
   .match-check .values { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+
+  /* ---- Watermark tab ---- */
+  .wm-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .wm-metrics { display: flex; gap: 20px; flex-wrap: wrap; margin: 18px 0 4px; }
+  .wm-metric {
+    background: #f2f2f5;
+    border-radius: 12px;
+    padding: 12px 16px;
+    min-width: 140px;
+  }
+  .wm-metric .label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .wm-metric .value { font-size: 18px; font-weight: 700; font-family: var(--mono); }
+  .wm-metric .value.pass { color: #1c7a34; }
+  .wm-metric .value.fail { color: #b3261e; }
 </style>
 </head>
 <body>
   <header>
     <h1>D2M Control Panel</h1>
-    <p>Backend, frontend, and messaging dev servers for the D2M matrimony platform, in one place.</p>
+    <p>Backend, frontend, messaging, and WedLock IAM dev servers for the D2M matrimony platform, in one place.</p>
   </header>
 
   <nav class="tab-nav">
     <button class="tab-btn active" id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
     <button class="tab-btn" id="tab-btn-accounts" onclick="showTab('accounts')">Accounts</button>
     <button class="tab-btn" id="tab-btn-diagnostics" onclick="showTab('diagnostics')">Diagnostics</button>
+    <button class="tab-btn" id="tab-btn-watermark" onclick="showTab('watermark')">Watermark</button>
+    <button class="tab-btn" id="tab-btn-sharelinks" onclick="showTab('sharelinks')">Share Links</button>
   </nav>
 
   <!-- ============================= Dashboard tab ============================= -->
@@ -432,6 +455,78 @@
       </div>
     </section>
 
+    <!-- WedLock -- IAM/account-management service D2M is integrating with.
+         Three independent processes, same pattern as Messaging above. -->
+    <section class="card collapsible-card collapsed" id="wedlock_iam-card">
+      <div class="card-header" onclick="toggleCard('wedlock_iam-card')">
+        <div class="service-title">
+          <span class="chevron">▾</span>
+          <span class="dot stopped" id="wedlock_iam-dot"></span>
+          <span>WedLock IAM</span>
+        </div>
+        <span class="state-label" id="wedlock_iam-state">—</span>
+      </div>
+      <div class="meta" id="wedlock_iam-meta">127.0.0.1:8010</div>
+      <div class="card-body">
+        <div class="meta">Needs its Postgres up first, and a one-time setup (venv, deps, .env, migrations) -- see the WedLock buttons in Quick actions below.</div>
+        <div class="buttons">
+          <button class="primary" onclick="callAction('/api/wedlock_iam/start')">Start</button>
+          <button onclick="callAction('/api/wedlock_iam/restart')">Restart</button>
+          <button class="danger" onclick="callAction('/api/wedlock_iam/stop')">Stop</button>
+          <button onclick="window.open('http://127.0.0.1:8010/ui/', '_blank')">Open UI ↗</button>
+          <button onclick="window.open('http://127.0.0.1:8010/health', '_blank')">Health ↗</button>
+          <button onclick="copyLog('wedlock_iam-log', this)">Copy log</button>
+        </div>
+        <div class="log" id="wedlock_iam-log"><span class="log-empty">No output yet.</span></div>
+      </div>
+    </section>
+
+    <section class="card collapsible-card collapsed" id="wedlock_email_otp-card">
+      <div class="card-header" onclick="toggleCard('wedlock_email_otp-card')">
+        <div class="service-title">
+          <span class="chevron">▾</span>
+          <span class="dot stopped" id="wedlock_email_otp-dot"></span>
+          <span>WedLock Email OTP</span>
+        </div>
+        <span class="state-label" id="wedlock_email_otp-state">—</span>
+      </div>
+      <div class="meta" id="wedlock_email_otp-meta">127.0.0.1:3000</div>
+      <div class="card-body">
+        <div class="meta">Console-mode by default -- OTP codes print to this service's own log below instead of sending real email.</div>
+        <div class="buttons">
+          <button class="primary" onclick="callAction('/api/wedlock_email_otp/start')">Start</button>
+          <button onclick="callAction('/api/wedlock_email_otp/restart')">Restart</button>
+          <button class="danger" onclick="callAction('/api/wedlock_email_otp/stop')">Stop</button>
+          <button onclick="window.open('http://127.0.0.1:3000/api/v1/health', '_blank')">Health ↗</button>
+          <button onclick="copyLog('wedlock_email_otp-log', this)">Copy log</button>
+        </div>
+        <div class="log" id="wedlock_email_otp-log"><span class="log-empty">No output yet.</span></div>
+      </div>
+    </section>
+
+    <section class="card collapsible-card collapsed" id="wedlock_otp_gateway-card">
+      <div class="card-header" onclick="toggleCard('wedlock_otp_gateway-card')">
+        <div class="service-title">
+          <span class="chevron">▾</span>
+          <span class="dot stopped" id="wedlock_otp_gateway-dot"></span>
+          <span>WedLock Phone OTP Gateway</span>
+        </div>
+        <span class="state-label" id="wedlock_otp_gateway-state">—</span>
+      </div>
+      <div class="meta" id="wedlock_otp_gateway-meta">127.0.0.1:9000</div>
+      <div class="card-body">
+        <div class="meta">Console-mode by default -- OTP codes print to this service's own log below instead of sending real WhatsApp/SMS.</div>
+        <div class="buttons">
+          <button class="primary" onclick="callAction('/api/wedlock_otp_gateway/start')">Start</button>
+          <button onclick="callAction('/api/wedlock_otp_gateway/restart')">Restart</button>
+          <button class="danger" onclick="callAction('/api/wedlock_otp_gateway/stop')">Stop</button>
+          <button onclick="window.open('http://127.0.0.1:9000/health', '_blank')">Health ↗</button>
+          <button onclick="copyLog('wedlock_otp_gateway-log', this)">Copy log</button>
+        </div>
+        <div class="log" id="wedlock_otp_gateway-log"><span class="log-empty">No output yet.</span></div>
+      </div>
+    </section>
+
     <section class="card actions-card">
       <div class="card-header">
         <div class="service-title"><span>Quick actions</span></div>
@@ -443,6 +538,9 @@
         <button onclick="callAction('/api/action/test', 'activity-msg')">Run backend tests</button>
         <button onclick="callAction('/api/action/messaging_infra_up', 'activity-msg')">Start messaging infra (Docker)</button>
         <button onclick="callAction('/api/action/messaging_infra_down', 'activity-msg')">Stop messaging infra (Docker)</button>
+        <button onclick="callAction('/api/action/wedlock_setup', 'activity-msg')">Set up WedLock (first time)</button>
+        <button onclick="callAction('/api/action/wedlock_db_up', 'activity-msg')">Start WedLock infra (Docker)</button>
+        <button onclick="callAction('/api/action/wedlock_db_down', 'activity-msg')">Stop WedLock infra (Docker)</button>
         <button class="primary" onclick="gitPushAll()">Push all changes to git ↗</button>
         <button onclick="copyLog('activity-log', this)">Copy log</button>
       </div>
@@ -505,6 +603,69 @@
     </section>
   </div>
 
+  <!-- ============================= Watermark tab ============================= -->
+  <div class="tab-panel grid-main" id="tab-watermark">
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Reveal a real screenshot</span></div>
+      </div>
+      <div class="meta">
+        The leak-forensics check -- "here's a screenshot someone took, who does it trace to." This does
+        NOT embed anything new: it only decodes whatever mark is already baked into the image you give it
+        (app/services/photo_watermark.py's TrustMark decoder) and looks that id up in the real
+        screen_view_audits history. So log in as a real account, view a real profile photo, screenshot it
+        (or save the photo file itself), and drop that screenshot here.
+      </div>
+      <div class="wm-controls">
+        <input type="file" id="wmr-file" accept="image/*" onchange="onWatermarkRevealFileChosen()" />
+        <button class="primary" id="wmr-run-btn" onclick="runWatermarkReveal()" disabled>Reveal watermark</button>
+      </div>
+      <div id="wmr-status" class="meta"></div>
+
+      <div class="wm-metrics" id="wmr-metrics" style="display:none;">
+        <div class="wm-metric">
+          <div class="label">Traces to (who)</div>
+          <div class="value" id="wmr-metric-viewer">—</div>
+        </div>
+        <div class="wm-metric">
+          <div class="label">Recorded at (when)</div>
+          <div class="value" id="wmr-metric-time">—</div>
+        </div>
+        <div class="wm-metric">
+          <div class="label">Screen</div>
+          <div class="value" id="wmr-metric-screen" style="font-size: 13px;">—</div>
+        </div>
+        <div class="wm-metric">
+          <div class="label">Decoded id</div>
+          <div class="value" id="wmr-metric-id" style="font-size: 13px;">—</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ============================= Share Links tab ============================= -->
+  <div class="tab-panel grid-main" id="tab-sharelinks">
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Profile share links</span></div>
+      </div>
+      <div class="meta">
+        Paste a primary id (see the Accounts tab) to list every share link ever created for that profile --
+        active, turned off, or expired -- with its live URL, detail level, and view count. Hits the same real
+        GET /primaries/{id}/share-links endpoint the app itself uses, not a synthetic dev-only route.
+      </div>
+      <div class="wm-controls">
+        <input class="search-input" id="sl-primary-id" type="text" placeholder="Primary id" style="width: 320px;" />
+        <button class="primary" onclick="loadShareLinks()">Load links</button>
+      </div>
+      <div id="sl-status" class="meta"></div>
+      <table class="accounts-table" id="sl-table" style="display:none;">
+        <thead><tr><th>Code (hover for URL)</th><th>Detail</th><th>Status</th><th>Expires</th><th>Views</th><th>Last viewed</th><th></th></tr></thead>
+        <tbody id="sl-tbody"></tbody>
+      </table>
+    </section>
+  </div>
+
   <footer id="paths-footer"></footer>
 
 <script>
@@ -555,6 +716,9 @@ async function refresh() {
     renderService("frontend", data.frontend);
     renderService("messaging", data.messaging);
     renderService("cloudflared", data.cloudflared);
+    renderService("wedlock_iam", data.wedlock_iam);
+    renderService("wedlock_email_otp", data.wedlock_email_otp);
+    renderService("wedlock_otp_gateway", data.wedlock_otp_gateway);
 
     const liveLinkMeta = document.getElementById("live-link-meta");
     if (data.cloudflared.state === "healthy" || data.cloudflared.state === "running_unmanaged") {
@@ -574,7 +738,7 @@ async function refresh() {
     renderLog(document.getElementById("activity-log"), data.activity.log);
 
     document.getElementById("paths-footer").textContent =
-      `Backend: ${data.paths.backend}  ·  Frontend: ${data.paths.frontend}  ·  Messaging: ${data.paths.messaging}`;
+      `Backend: ${data.paths.backend}  ·  Frontend: ${data.paths.frontend}  ·  Messaging: ${data.paths.messaging}  ·  WedLock IAM: ${data.paths.wedlock_iam}`;
   } catch (e) {
     // control panel server itself is down -- unlikely since we're loaded
     // from it, but fail quietly rather than spamming the console.
@@ -828,6 +992,157 @@ async function resetData(btn) {
     refresh();
     refreshAccounts();
   }
+}
+
+// ---- Watermark reveal -----------------------------------------------------
+// Reads the picked file as base64 client-side (FileReader), POSTs it to
+// the control panel's own /api/watermark-reveal proxy (see
+// control_panel.py's reveal_watermark(), which forwards it to the
+// backend's POST /admin/watermark-reveal), and renders who/when the
+// image's existing watermark traces back to.
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // dataURL looks like "data:image/png;base64,AAAA..." -- only the
+      // part after the comma is what the backend's base64.b64decode wants.
+      const commaIdx = reader.result.indexOf(",");
+      resolve(reader.result.slice(commaIdx + 1));
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+let wmrSelectedFile = null;
+
+function onWatermarkRevealFileChosen() {
+  const input = document.getElementById("wmr-file");
+  const file = input.files && input.files[0];
+  const runBtn = document.getElementById("wmr-run-btn");
+
+  wmrSelectedFile = file || null;
+  runBtn.disabled = !file;
+  document.getElementById("wmr-status").textContent = "";
+  document.getElementById("wmr-metrics").style.display = "none";
+}
+
+async function runWatermarkReveal() {
+  if (!wmrSelectedFile) return;
+  const runBtn = document.getElementById("wmr-run-btn");
+  const statusEl = document.getElementById("wmr-status");
+  const metricsEl = document.getElementById("wmr-metrics");
+
+  runBtn.disabled = true;
+  statusEl.textContent = "Decoding…";
+  metricsEl.style.display = "none";
+
+  let data;
+  try {
+    const image_base64 = await readFileAsBase64(wmrSelectedFile);
+    const res = await fetch("/api/watermark-reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_base64 }),
+    });
+    data = await res.json();
+  } catch (e) {
+    data = { error: "Couldn't reach the control panel." };
+  }
+
+  runBtn.disabled = false;
+
+  if (data.error) {
+    statusEl.textContent = escapeHtml(data.error);
+    return;
+  }
+
+  if (!data.found) {
+    statusEl.textContent =
+      `Decoded id "${data.watermark_id_prefix}" but no matching screen_view_audits row was found ` +
+      `(database may have been reset since this image was viewed).`;
+    return;
+  }
+
+  statusEl.textContent = "";
+  document.getElementById("wmr-metric-viewer").textContent = data.viewer_name
+    ? `${data.viewer_name} (${data.viewer_id})`
+    : data.viewer_id;
+  document.getElementById("wmr-metric-time").textContent = data.server_time;
+  document.getElementById("wmr-metric-screen").textContent = data.screen;
+  document.getElementById("wmr-metric-id").textContent = data.watermark_id_prefix;
+  metricsEl.style.display = "flex";
+}
+
+// ---- Share Links -----------------------------------------------------
+// Reads/toggles real share links (app/routers/identity.py's
+// /primaries/{id}/share-links) via control_panel.py's fetch_share_links()/
+// toggle_share_link() proxies -- no synthetic dev-only endpoint, this is
+// exactly what the app itself calls.
+let slCurrentPrimaryId = null;
+
+function loadShareLinks() {
+  const primaryId = document.getElementById("sl-primary-id").value.trim();
+  const statusEl = document.getElementById("sl-status");
+  const table = document.getElementById("sl-table");
+  const tbody = document.getElementById("sl-tbody");
+
+  if (!primaryId) {
+    statusEl.textContent = "Paste a primary id first.";
+    table.style.display = "none";
+    return;
+  }
+  slCurrentPrimaryId = primaryId;
+  statusEl.textContent = "Loading…";
+  table.style.display = "none";
+
+  fetch(`/api/share-links/${encodeURIComponent(primaryId)}`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        statusEl.textContent = data.error;
+        return;
+      }
+      const links = data.links || [];
+      statusEl.textContent = links.length ? "" : "No share links for this primary yet.";
+      if (!links.length) {
+        table.style.display = "none";
+        return;
+      }
+      table.style.display = "";
+      tbody.innerHTML = links.map((link) => {
+        const url = link.preview_url;
+        const expired = new Date(link.expires_at).getTime() < Date.now();
+        const statusLabel = !link.is_active ? "Turned off" : expired ? "Expired" : "Active";
+        return `
+          <tr>
+            <td class="acct-id" title="${escapeHtml(url)}">${escapeHtml(link.code)}</td>
+            <td>${escapeHtml(link.detail_level)}</td>
+            <td>${statusLabel}</td>
+            <td>${escapeHtml(link.expires_at.slice(0, 10))}</td>
+            <td>${link.view_count}</td>
+            <td>${link.last_viewed_at ? escapeHtml(link.last_viewed_at.slice(0, 16)) : "—"}</td>
+            <td><button onclick="toggleShareLinkRow('${link.id}', ${!link.is_active})">${link.is_active ? "Turn off" : "Turn on"}</button></td>
+          </tr>`;
+      }).join("");
+    })
+    .catch(() => {
+      statusEl.textContent = "Couldn't reach the control panel.";
+    });
+}
+
+function toggleShareLinkRow(linkId, nextIsActive) {
+  if (!slCurrentPrimaryId) return;
+  fetch(`/api/share-links/${encodeURIComponent(slCurrentPrimaryId)}/${encodeURIComponent(linkId)}/toggle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ is_active: nextIsActive }),
+  })
+    .then(() => loadShareLinks())
+    .catch(() => {
+      document.getElementById("sl-status").textContent = "Couldn't reach the control panel.";
+    });
 }
 
 refresh();

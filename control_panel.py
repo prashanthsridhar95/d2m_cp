@@ -37,14 +37,28 @@ FRONTEND_DIR = Path(os.path.expanduser("~/Desktop/d2m_web"))
 # is a root-level script that runs `npm run dev -w @msg/server`, so this
 # needs to be the repo root, not packages/server itself.
 MESSAGING_DIR = Path(os.path.expanduser("~/Desktop/messaging-framework"))
+# WedLock -- the IAM/account-management service D2M is integrating with
+# (see the repo's own INTEGRATION notes). Three independent processes,
+# same as messaging above: the IAM API + its bundled demo UI, and its two
+# OTP microservices. All three live under one cloned repo.
+WEDLOCK_ROOT_DIR = Path(os.path.expanduser("~/Desktop/WedLock"))
+WEDLOCK_IAM_DIR = WEDLOCK_ROOT_DIR / "WedLockIAM" / "wedlock_iam"
+WEDLOCK_EMAIL_OTP_DIR = WEDLOCK_ROOT_DIR / "email_otp"
+WEDLOCK_OTP_GATEWAY_DIR = WEDLOCK_ROOT_DIR / "otp_gateway"
 
 BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
 MESSAGING_PORT = 4000
+WEDLOCK_IAM_PORT = 8010
+WEDLOCK_EMAIL_OTP_PORT = 3000
+WEDLOCK_OTP_GATEWAY_PORT = 9000
 
 BACKEND_URL = f"http://127.0.0.1:{BACKEND_PORT}"
 FRONTEND_URL = f"http://127.0.0.1:{FRONTEND_PORT}"
 MESSAGING_URL = f"http://127.0.0.1:{MESSAGING_PORT}"
+WEDLOCK_IAM_URL = f"http://127.0.0.1:{WEDLOCK_IAM_PORT}"
+WEDLOCK_EMAIL_OTP_URL = f"http://127.0.0.1:{WEDLOCK_EMAIL_OTP_PORT}"
+WEDLOCK_OTP_GATEWAY_URL = f"http://127.0.0.1:{WEDLOCK_OTP_GATEWAY_PORT}"
 
 LOG_DIR = Path(os.path.expanduser("~/Library/Application Support/D2MControlPanel/logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -112,6 +126,19 @@ def _backend_python() -> str:
     venv_python = BACKEND_DIR / "venv" / "bin" / "python"
     if venv_python.exists():
         return str(venv_python)
+    return "python3"
+
+
+def _venv_python(repo_dir: Path) -> str:
+    """Same fallback as _backend_python() above, generalized to any repo --
+    WedLock's own setup docs create a `.venv` (dot-prefixed, the Python
+    stdlib default) rather than d2m_core_engine's plain `venv`, so this
+    checks both spellings before giving up and falling back to python3 on
+    PATH."""
+    for venv_name in (".venv", "venv"):
+        venv_python = repo_dir / venv_name / "bin" / "python"
+        if venv_python.exists():
+            return str(venv_python)
     return "python3"
 
 
@@ -330,9 +357,40 @@ def _messaging_health_ok(body: bytes) -> bool:
         return False
 
 
+# WedLock IAM's /health returns {"status": "ok"} -- identical shape to
+# D2M's own backend, so this is really just _backend_health_ok under a
+# name that says what it's actually checking.
+def _wedlock_iam_health_ok(body: bytes) -> bool:
+    try:
+        return json.loads(body).get("status") == "ok"
+    except Exception:
+        return False
+
+
+# email_otp's /health returns {"ok": true, "service": "email-otp"} --
+# same {"ok": true} shape the messaging server uses.
+def _wedlock_email_otp_health_ok(body: bytes) -> bool:
+    try:
+        return json.loads(body).get("ok") is True
+    except Exception:
+        return False
+
+
+# otp_gateway's /health returns {"status": "healthy", ...} -- "healthy",
+# not "ok" like the other two, so this one can't reuse either helper above.
+def _wedlock_otp_gateway_health_ok(body: bytes) -> bool:
+    try:
+        return json.loads(body).get("status") == "healthy"
+    except Exception:
+        return False
+
+
 backend = ManagedService("backend", BACKEND_PORT, f"{BACKEND_URL}/health", _backend_health_ok)
 frontend = ManagedService("frontend", FRONTEND_PORT, FRONTEND_URL)
 messaging = ManagedService("messaging", MESSAGING_PORT, f"{MESSAGING_URL}/health", _messaging_health_ok)
+wedlock_iam = ManagedService("wedlock_iam", WEDLOCK_IAM_PORT, f"{WEDLOCK_IAM_URL}/health", _wedlock_iam_health_ok)
+wedlock_email_otp = ManagedService("wedlock_email_otp", WEDLOCK_EMAIL_OTP_PORT, f"{WEDLOCK_EMAIL_OTP_URL}/api/v1/health", _wedlock_email_otp_health_ok)
+wedlock_otp_gateway = ManagedService("wedlock_otp_gateway", WEDLOCK_OTP_GATEWAY_PORT, f"{WEDLOCK_OTP_GATEWAY_URL}/health", _wedlock_otp_gateway_health_ok)
 # Health-checked via cloudflared's own --metrics /ready endpoint, which only
 # returns 200 once the tunnel has an actual established connection to
 # Cloudflare's edge -- a real "is this thing working" signal, not just
@@ -381,6 +439,20 @@ def frontend_preview_cmd() -> list[str]:
 
 def messaging_start_cmd() -> list[str]:
     return ["npm", "run", "dev:server"]
+
+
+def wedlock_iam_start_cmd() -> list[str]:
+    return [_venv_python(WEDLOCK_IAM_DIR), "-m", "uvicorn", "app.main:app", "--reload",
+            "--host", "127.0.0.1", "--port", str(WEDLOCK_IAM_PORT)]
+
+
+def wedlock_email_otp_start_cmd() -> list[str]:
+    return ["npm", "start"]
+
+
+def wedlock_otp_gateway_start_cmd() -> list[str]:
+    return [_venv_python(WEDLOCK_OTP_GATEWAY_DIR), "-m", "uvicorn", "otp_gateway.api.main:app", "--reload",
+            "--host", "127.0.0.1", "--port", str(WEDLOCK_OTP_GATEWAY_PORT)]
 
 
 def cloudflared_start_cmd() -> list[str]:
@@ -664,6 +736,18 @@ ACTIONS = {
         "Stop messaging infra (docker compose)",
         ["docker", "compose", "down"], MESSAGING_DIR,
     ),
+    # Multi-step (venvs, npm install, .env files, migrations) -- its own
+    # orchestration function rather than a single run_activity_async
+    # command, see _run_wedlock_setup above.
+    "wedlock_setup": lambda: wedlock_setup(),
+    "wedlock_db_up": lambda: run_activity_async(
+        "Start WedLock infra (docker compose)",
+        ["docker", "compose", "up", "-d", "--wait", "db"], WEDLOCK_IAM_DIR,
+    ),
+    "wedlock_db_down": lambda: run_activity_async(
+        "Stop WedLock infra (docker compose)",
+        ["docker", "compose", "down"], WEDLOCK_IAM_DIR,
+    ),
 }
 
 
@@ -851,6 +935,148 @@ def go_local() -> str:
     return "Started: Go local (stop public access)"
 
 
+# ---- WedLock one-time setup -------------------------------------------
+# Same "stream real output into the activity log" shape as _run_go_live
+# above, for a very different job: getting a freshly-cloned WedLock repo
+# (3 independent services) from nothing to runnable. Mirrors exactly what
+# WedLock/README.md's own "Quick start" tells a person to do by hand --
+# create each venv, install each service's deps, copy each .env.example
+# to .env (only if .env doesn't already exist -- never overwrites secrets
+# someone's already customized), then bring up its Postgres and run
+# Alembic. One extra step past what the README says: IAM's
+# PHONE_OTP_GATEWAY_API_KEY placeholder ("must-match-otp-gateway-api-key")
+# doesn't actually match otp_gateway's own default API_KEY out of the box
+# -- the README just says "ensure these match," this makes that true
+# automatically instead of leaving it as a footgun that breaks phone-OTP
+# with two freshly-copied .env files that look fine individually.
+def _copy_env_if_missing(repo_dir: Path, log) -> bool:
+    """Returns True if a .env now exists (either just created or already
+    there), False if there's no .env.example to copy from."""
+    env_path = repo_dir / ".env"
+    example_path = repo_dir / ".env.example"
+    if env_path.exists():
+        log(f"{repo_dir.name}/.env already exists -- leaving it alone.")
+        return True
+    if not example_path.exists():
+        log(f"{repo_dir.name}/.env.example not found -- can't create .env.")
+        return False
+    shutil.copyfile(example_path, env_path)
+    log(f"Created {repo_dir.name}/.env from .env.example.")
+    return True
+
+
+def _reconcile_otp_gateway_api_key(log) -> None:
+    gateway_env = WEDLOCK_OTP_GATEWAY_DIR / ".env"
+    iam_env = WEDLOCK_IAM_DIR / ".env"
+    if not gateway_env.exists() or not iam_env.exists():
+        return
+    gateway_key = None
+    for line in gateway_env.read_text().splitlines():
+        if line.startswith("API_KEY="):
+            gateway_key = line[len("API_KEY="):].strip()
+            break
+    if not gateway_key:
+        return
+    iam_lines = iam_env.read_text().splitlines()
+    changed = False
+    for i, line in enumerate(iam_lines):
+        if line.startswith("PHONE_OTP_GATEWAY_API_KEY=") and line != f"PHONE_OTP_GATEWAY_API_KEY={gateway_key}":
+            iam_lines[i] = f"PHONE_OTP_GATEWAY_API_KEY={gateway_key}"
+            changed = True
+    if changed:
+        iam_env.write_text("\n".join(iam_lines) + "\n")
+        log("Matched IAM's PHONE_OTP_GATEWAY_API_KEY to otp_gateway's own API_KEY.")
+
+
+def _run_venv_step(label: str, repo_dir: Path, log) -> bool:
+    """Creates .venv (if missing) and `pip install -e ".[dev]"` into it.
+    Returns True on success, False if anything failed (subsequent steps
+    that depend on this venv should be skipped, not run against a
+    half-set-up environment)."""
+    venv_dir = repo_dir / ".venv"
+    if not venv_dir.exists():
+        log(f"Creating venv for {label}…")
+        out = subprocess.run(["python3", "-m", "venv", ".venv"], cwd=str(repo_dir), capture_output=True, text=True)
+        if out.returncode != 0:
+            log(f"Failed to create venv for {label}: {out.stderr.strip()[-500:]}")
+            return False
+    log(f"Installing {label} dependencies (this can take a little while)…")
+    out = subprocess.run(
+        [_venv_python(repo_dir), "-m", "pip", "install", "-e", ".[dev]"],
+        cwd=str(repo_dir), capture_output=True, text=True, timeout=300,
+    )
+    if out.stdout.strip():
+        log(out.stdout.strip()[-1500:])
+    if out.returncode != 0:
+        log(f"{label} dependency install failed (exit {out.returncode}) -- see output above.")
+        return False
+    return True
+
+
+def _run_wedlock_setup() -> None:
+    with activity_lock:
+        activity_state["running"] = True
+        activity_state["label"] = "Set up WedLock"
+        activity_state["log"] = []
+
+    for repo_dir in (WEDLOCK_IAM_DIR, WEDLOCK_EMAIL_OTP_DIR, WEDLOCK_OTP_GATEWAY_DIR):
+        if not repo_dir.exists():
+            _activity_log(f"{repo_dir} doesn't exist -- clone the WedLock repo to ~/Desktop/WedLock first.")
+            with activity_lock:
+                activity_state["running"] = False
+            return
+        _copy_env_if_missing(repo_dir, _activity_log)
+    _reconcile_otp_gateway_api_key(_activity_log)
+
+    iam_ok = _run_venv_step("WedLock IAM", WEDLOCK_IAM_DIR, _activity_log)
+    _run_venv_step("otp_gateway", WEDLOCK_OTP_GATEWAY_DIR, _activity_log)
+
+    _activity_log("Installing email_otp dependencies…")
+    out = subprocess.run(["npm", "install"], cwd=str(WEDLOCK_EMAIL_OTP_DIR), capture_output=True, text=True, timeout=300)
+    if out.stdout.strip():
+        _activity_log(out.stdout.strip()[-1500:])
+    if out.returncode != 0:
+        _activity_log(f"email_otp npm install failed (exit {out.returncode}) -- see output above.")
+
+    if iam_ok:
+        _activity_log("Starting WedLock's Postgres (docker compose)…")
+        try:
+            out = subprocess.run(
+                ["docker", "compose", "up", "-d", "--wait", "db"],
+                cwd=str(WEDLOCK_IAM_DIR), capture_output=True, text=True, timeout=60,
+            )
+            for stream in (out.stdout, out.stderr):
+                if stream and stream.strip():
+                    _activity_log(stream.strip())
+        except Exception as e:
+            _activity_log(f"Docker compose failed: {e} -- is Docker Desktop running?")
+
+        _activity_log("Running WedLock IAM's database migrations…")
+        out = subprocess.run(
+            [_venv_python(WEDLOCK_IAM_DIR), "-m", "alembic", "upgrade", "head"],
+            cwd=str(WEDLOCK_IAM_DIR), capture_output=True, text=True, timeout=60,
+        )
+        for stream in (out.stdout, out.stderr):
+            if stream and stream.strip():
+                _activity_log(stream.strip()[-1500:])
+        if out.returncode != 0:
+            _activity_log(f"Migrations failed (exit {out.returncode}) -- see output above.")
+        else:
+            _activity_log("WedLock is set up. Start its three services from the cards above.")
+    else:
+        _activity_log("Skipping Postgres/migrations -- IAM's own dependency install failed above.")
+
+    with activity_lock:
+        activity_state["running"] = False
+
+
+def wedlock_setup() -> str:
+    if activity_state["running"]:
+        return f"Already running: {activity_state['label']}"
+    threading.Thread(target=_run_wedlock_setup, daemon=True).start()
+    return "Started: Set up WedLock"
+
+
 # ---- Watchdog: auto-heal services that die on their own -------------------
 # Everything above (docker --wait, --host 127.0.0.1, the orphan-reclaim in
 # ManagedService.start(), the ingress localhost->127.0.0.1 normalization,
@@ -880,6 +1106,9 @@ def _watchdog_targets() -> list[tuple[ManagedService, list[str], Path]]:
         (backend, backend_start_cmd(), BACKEND_DIR),
         (frontend, frontend_preview_cmd() if _public_mode else frontend_start_cmd(), FRONTEND_DIR),
         (messaging, messaging_start_cmd(), MESSAGING_DIR),
+        (wedlock_iam, wedlock_iam_start_cmd(), WEDLOCK_IAM_DIR),
+        (wedlock_email_otp, wedlock_email_otp_start_cmd(), WEDLOCK_EMAIL_OTP_DIR),
+        (wedlock_otp_gateway, wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR),
     ]
 
 
@@ -1108,6 +1337,42 @@ def fetch_invite_link(sponsor_id: str) -> dict:
     return body
 
 
+def reveal_watermark(body: dict) -> dict:
+    """
+    Server-side proxy to POST /admin/watermark-reveal -- the actual
+    leak-forensics check ("here's a real screenshot, who does it trace
+    to"): decodes whatever mark is already baked into the uploaded image
+    and looks it up in the real screen_view_audits history, rather than
+    stamping a fresh mark of its own. Same CORS-avoidance/proxy reasoning
+    as fetch_accounts() etc. above, forwarded as-is (already JSON:
+    {image_base64} from the browser) -- no multipart handling needed
+    anywhere in this stdlib-only panel. Generous timeout: TrustMark's
+    decode uses the same lazily-initialized singleton as embed, so the
+    very first call on a fresh backend process can take a couple of
+    minutes while its model weights download from Adobe's CDN.
+    """
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/admin/watermark-reveal", method="POST", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=200) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        if detail:
+            return {"error": detail if isinstance(detail, str) else json.dumps(detail)}
+        return {"error": "Not available -- /admin/watermark-reveal isn't registered "
+                          "(this happens if D2M_ENVIRONMENT=production is set)."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
 def fetch_match_diagnostic(primary_a_id: str, primary_b_id: str) -> dict:
     """
     Server-side proxy to GET /admin/match-diagnostic/{a}/{b} -- answers
@@ -1131,6 +1396,65 @@ def fetch_match_diagnostic(primary_a_id: str, primary_b_id: str) -> dict:
             return {"error": detail}
         return {"error": "Not available -- /admin/match-diagnostic isn't registered "
                           "(this happens if D2M_ENVIRONMENT=production is set)."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
+def fetch_share_links(primary_id: str) -> dict:
+    """
+    Server-side proxy to GET /primaries/{id}/share-links -- lists every
+    profile share link ever created for a primary_id (active/revoked/
+    expired), each with its stored short code/URL, detail_level, and view
+    stats. Unlike fetch_accounts()/fetch_invite_link() above, this hits a
+    REAL, always-registered route (app/routers/identity.py), not an
+    /admin one -- so no "not available in production" caveat, just the
+    ordinary reachability check.
+    """
+    try:
+        with urllib.request.urlopen(f"{BACKEND_URL}/primaries/{primary_id}/share-links", timeout=3) as resp:
+            links = json.loads(resp.read())
+        # Built here (not in the JS) since this process is the one that
+        # actually knows BACKEND_URL/its port -- the JS previously guessed
+        # a hardcoded :8000, which silently breaks if the backend is ever
+        # configured to run anywhere else. Root-level, not /links/{code}/
+        # share -- see app/routers/links.py's root_router docstring for
+        # why the actual paste-able URL is short and bare like this.
+        for link in links:
+            link["preview_url"] = f"{BACKEND_URL}/{link['code']}"
+        return {"links": links}
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        return {"error": detail or f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
+def toggle_share_link(primary_id: str, link_id: str, is_active: bool) -> dict:
+    """
+    Server-side proxy to PUT /primaries/{id}/share-links/{link_id} -- this
+    stdlib server only implements do_GET/do_POST (see Handler below), so a
+    POST here is what drives the backend's real PUT, same indirection
+    go_live()/go_local() etc already use for other backend actions.
+    """
+    data = json.dumps({"is_active": is_active}).encode()
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/primaries/{primary_id}/share-links/{link_id}", method="PUT", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        return {"error": detail or f"Backend returned HTTP {e.code}."}
     except Exception:
         return {"error": "Backend isn't reachable -- start it first."}
 
@@ -1171,8 +1495,15 @@ class Handler(BaseHTTPRequestHandler):
                 "frontend": frontend.status(),
                 "messaging": messaging.status(),
                 "cloudflared": cloudflared.status(),
+                "wedlock_iam": wedlock_iam.status(),
+                "wedlock_email_otp": wedlock_email_otp.status(),
+                "wedlock_otp_gateway": wedlock_otp_gateway.status(),
                 "activity": activity_copy,
-                "paths": {"backend": str(BACKEND_DIR), "frontend": str(FRONTEND_DIR), "messaging": str(MESSAGING_DIR)},
+                "paths": {
+                    "backend": str(BACKEND_DIR), "frontend": str(FRONTEND_DIR), "messaging": str(MESSAGING_DIR),
+                    "wedlock_iam": str(WEDLOCK_IAM_DIR), "wedlock_email_otp": str(WEDLOCK_EMAIL_OTP_DIR),
+                    "wedlock_otp_gateway": str(WEDLOCK_OTP_GATEWAY_DIR),
+                },
                 "public": {"app": PUBLIC_HOSTNAME_APP, "api": PUBLIC_HOSTNAME_API, "msg": PUBLIC_HOSTNAME_MSG},
             })
             return
@@ -1185,6 +1516,12 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) != 2 or not all(parts):
                 return self._json({"error": "Need both a primary id and a candidate id."}, status=400)
             return self._json(fetch_match_diagnostic(parts[0], parts[1]))
+
+        if self.path.startswith("/api/share-links/"):
+            primary_id = self.path[len("/api/share-links/"):]
+            if not primary_id:
+                return self._json({"error": "Need a primary id."}, status=400)
+            return self._json(fetch_share_links(primary_id))
 
         self.send_error(404)
 
@@ -1210,6 +1547,27 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/messaging/restart":
             return self._json({"message": messaging.restart(messaging_start_cmd(), MESSAGING_DIR)})
 
+        if self.path == "/api/wedlock_iam/start":
+            return self._json({"message": wedlock_iam.start(wedlock_iam_start_cmd(), WEDLOCK_IAM_DIR)})
+        if self.path == "/api/wedlock_iam/stop":
+            return self._json({"message": wedlock_iam.stop()})
+        if self.path == "/api/wedlock_iam/restart":
+            return self._json({"message": wedlock_iam.restart(wedlock_iam_start_cmd(), WEDLOCK_IAM_DIR)})
+
+        if self.path == "/api/wedlock_email_otp/start":
+            return self._json({"message": wedlock_email_otp.start(wedlock_email_otp_start_cmd(), WEDLOCK_EMAIL_OTP_DIR)})
+        if self.path == "/api/wedlock_email_otp/stop":
+            return self._json({"message": wedlock_email_otp.stop()})
+        if self.path == "/api/wedlock_email_otp/restart":
+            return self._json({"message": wedlock_email_otp.restart(wedlock_email_otp_start_cmd(), WEDLOCK_EMAIL_OTP_DIR)})
+
+        if self.path == "/api/wedlock_otp_gateway/start":
+            return self._json({"message": wedlock_otp_gateway.start(wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR)})
+        if self.path == "/api/wedlock_otp_gateway/stop":
+            return self._json({"message": wedlock_otp_gateway.stop()})
+        if self.path == "/api/wedlock_otp_gateway/restart":
+            return self._json({"message": wedlock_otp_gateway.restart(wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR)})
+
         if self.path.startswith("/api/action/"):
             key = self.path.rsplit("/", 1)[-1]
             action = ACTIONS.get(key)
@@ -1221,6 +1579,14 @@ class Handler(BaseHTTPRequestHandler):
             sponsor_id = self.path.rsplit("/", 1)[-1]
             return self._json(fetch_invite_link(sponsor_id))
 
+        if self.path == "/api/watermark-reveal":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                return self._json({"error": "Malformed request body."}, status=400)
+            return self._json(reveal_watermark(body))
+
         if self.path == "/api/reset-data":
             return self._json({"message": reset_data()})
 
@@ -1228,6 +1594,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"message": go_live()})
         if self.path == "/api/go-local":
             return self._json({"message": go_local()})
+
+        if self.path.startswith("/api/share-links/") and self.path.endswith("/toggle"):
+            parts = self.path[len("/api/share-links/"):-len("/toggle")].split("/")
+            if len(parts) != 2 or not all(parts):
+                return self._json({"error": "Need both a primary id and a link id."}, status=400)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                return self._json({"error": "Malformed request body."}, status=400)
+            return self._json(toggle_share_link(parts[0], parts[1], bool(body.get("is_active"))))
 
         self.send_error(404)
 
