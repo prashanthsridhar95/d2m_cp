@@ -207,6 +207,12 @@
   .collapsible-card.collapsed .card-body { display: none; }
   .collapsible-card.collapsed .meta { margin-bottom: 0; }
 
+  /* The shared .grid-main caps every tab at max-width: 1100px -- fine for
+     the two-column dashboard cards, but the Accounts tables (6-7 columns
+     each, including the new Email/Password split) want the full window.
+     Overrides just this one tab rather than touching .grid-main, which
+     every other tab still relies on staying narrow. */
+  .accounts-tab-panel { max-width: none; width: 100%; }
   .accounts-card { grid-column: 1 / -1; }
   .accounts-card .card-header { margin-bottom: 14px; }
   .search-input {
@@ -292,6 +298,10 @@
     padding: 8px 2px;
   }
   .accounts-error { color: #b3261e; }
+
+  .acct-login-email { font-family: var(--mono); font-size: 11px; margin-right: 8px; }
+  .acct-login-pw { font-family: var(--mono); font-size: 11px; margin-right: 8px; }
+  .acct-login-none { font-size: 11px; color: var(--muted); font-style: italic; }
 
   .danger-card { border-color: rgba(255,69,58,0.3); }
   .danger-card .meta { margin-bottom: 14px; }
@@ -535,6 +545,7 @@
         <button onclick="callAction('/api/action/install_backend', 'activity-msg')">Install backend deps</button>
         <button onclick="callAction('/api/action/install_frontend', 'activity-msg')">Install frontend deps</button>
         <button onclick="callAction('/api/action/seed', 'activity-msg')">Seed demo data</button>
+        <button onclick="callAction('/api/action/seed_wedlock_accounts', 'activity-msg')" title="Real WedLock email+password accounts, linked to D2M sponsors/primaries -- see the Accounts tab's Login column. Needs WedLock IAM + email_otp running.">Seed demo accounts (WedLock logins)</button>
         <button onclick="callAction('/api/action/test', 'activity-msg')">Run backend tests</button>
         <button onclick="callAction('/api/action/messaging_infra_up', 'activity-msg')">Start messaging infra (Docker)</button>
         <button onclick="callAction('/api/action/messaging_infra_down', 'activity-msg')">Stop messaging infra (Docker)</button>
@@ -551,7 +562,7 @@
   </div>
 
   <!-- ============================= Accounts tab ============================= -->
-  <div class="tab-panel grid-main" id="tab-accounts">
+  <div class="tab-panel grid-main accounts-tab-panel" id="tab-accounts">
     <section class="card actions-card accounts-card">
       <div class="card-header">
         <div class="service-title"><span>Accounts</span></div>
@@ -561,14 +572,14 @@
         <div class="accounts-col">
           <h3>Parents (Sponsors)</h3>
           <table class="accounts-table">
-            <thead><tr><th>Name</th><th>ID</th><th>Has child</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>ID</th><th>Email</th><th>Password</th><th>Has child</th><th></th></tr></thead>
             <tbody id="sponsors-tbody"></tbody>
           </table>
         </div>
         <div class="accounts-col">
           <h3>Children (Primaries)</h3>
           <table class="accounts-table">
-            <thead><tr><th>Name</th><th>ID</th><th>Parent</th><th>Profile</th><th></th></tr></thead>
+            <thead><tr><th>Name</th><th>ID</th><th>Email</th><th>Password</th><th>Parent</th><th>Profile</th><th></th></tr></thead>
             <tbody id="primaries-tbody"></tbody>
           </table>
         </div>
@@ -595,7 +606,7 @@
       <div class="card-header">
         <div class="service-title"><span>Danger zone</span></div>
       </div>
-      <div class="meta">Permanently deletes every sponsor, primary, match, and thread in the local dev database. Cannot be undone.</div>
+      <div class="meta">Permanently deletes every sponsor, primary, match, and thread in the local dev database. Cannot be undone. Afterward, use "Seed demo accounts (WedLock logins)" in Quick actions to load fresh demo data with real, working logins (see the Accounts tab).</div>
       <div class="buttons">
         <button class="danger" onclick="resetData(this)">Reset all data</button>
       </div>
@@ -771,7 +782,7 @@ async function gitPushAll() {
 // /api/accounts proxy (see control_panel.py's fetch_accounts()). Exists
 // because there's no real login yet -- "signing in" as an account means
 // knowing its id, and this is the only place to find one without digging
-// through seed.py output or the DB directly.
+// through a seed script's output or the DB directly.
 
 let accountsData = null;
 
@@ -846,49 +857,82 @@ async function getInviteLink(sponsorId, btn) {
   cell.innerHTML = `<span class="acct-link-ok" title="${escapeHtml(data.claim_url)}">${copied ? "Link copied ✓" : "Ready -- hover to see it"}</span>`;
 }
 
+// Renders the Email column: the real WedLock login email for an account
+// seeded by scripts/seed_demo_wedlock_accounts.py or otherwise WedLock-
+// linked, with a copy button -- or a plain "no WedLock login" note for
+// pre-WedLock/dev-only rows that can't log in through the real Login
+// screen at all.
+function emailCell(entity) {
+  if (!entity.wedlock_linked) {
+    return '<span class="acct-login-none">No WedLock login</span>';
+  }
+  const email = entity.email || "";
+  return `
+    <span class="acct-login-email">${escapeHtml(email)}</span>
+    <button class="copy-btn" onclick="copyToClipboard('${escapeHtml(email)}', this)">Copy</button>`;
+}
+
+// Renders the Password column: only ever known for an account seeded by
+// scripts/seed_demo_wedlock_accounts.py (the only thing that ever sets
+// dev_login_password -- see that script's and app/models/identity.py's
+// own docstrings). "unknown" for a real WedLock-linked account this panel
+// never set a password for, "—" for a pre-WedLock/dev-only row with no
+// WedLock login at all.
+function passwordCell(entity) {
+  if (!entity.wedlock_linked) return '<span class="acct-login-none">—</span>';
+  if (!entity.dev_login_password) return '<span class="acct-login-none">unknown</span>';
+  return `
+    <span class="acct-login-pw">${escapeHtml(entity.dev_login_password)}</span>
+    <button class="copy-btn" onclick="copyToClipboard('${escapeHtml(entity.dev_login_password)}', this)">Copy</button>`;
+}
+
 function renderAccounts() {
   const sTbody = document.getElementById("sponsors-tbody");
   const pTbody = document.getElementById("primaries-tbody");
   const term = document.getElementById("accounts-search").value.trim();
 
   if (!accountsData) {
-    sTbody.innerHTML = '<tr><td colspan="4"><div class="accounts-empty">Loading…</div></td></tr>';
-    pTbody.innerHTML = '<tr><td colspan="5"><div class="accounts-empty">Loading…</div></td></tr>';
+    sTbody.innerHTML = '<tr><td colspan="6"><div class="accounts-empty">Loading…</div></td></tr>';
+    pTbody.innerHTML = '<tr><td colspan="7"><div class="accounts-empty">Loading…</div></td></tr>';
     return;
   }
   if (accountsData.error) {
-    sTbody.innerHTML = `<tr><td colspan="4"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
-    pTbody.innerHTML = `<tr><td colspan="5"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
+    sTbody.innerHTML = `<tr><td colspan="6"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
+    pTbody.innerHTML = `<tr><td colspan="7"><div class="accounts-error">${escapeHtml(accountsData.error)}</div></td></tr>`;
     return;
   }
 
-  const sponsors = (accountsData.sponsors || []).filter((s) => matchesSearch(term, s.name, s.sponsor_id));
+  const sponsors = (accountsData.sponsors || []).filter((s) => matchesSearch(term, s.name, s.sponsor_id, s.email));
   const primaries = (accountsData.primaries || []).filter((p) =>
-    matchesSearch(term, p.name, p.primary_id, p.sponsor_name));
+    matchesSearch(term, p.name, p.primary_id, p.sponsor_name, p.email));
 
   sTbody.innerHTML = sponsors.length
     ? sponsors.map((s) => `
       <tr>
         <td class="acct-name">${escapeHtml(s.name)}</td>
         <td class="acct-id" title="${escapeHtml(s.sponsor_id)}">${escapeHtml(s.sponsor_id.slice(0, 8))}…</td>
+        <td>${emailCell(s)}</td>
+        <td>${passwordCell(s)}</td>
         <td>${s.has_child ? '<span class="badge yes">Yes</span>' : '<span class="badge no">No</span>'}</td>
         <td>
           <button class="copy-btn" onclick="copyToClipboard('${s.sponsor_id}', this)">Copy ID</button>
           ${s.has_child ? "" : `<button class="copy-btn" onclick="getInviteLink('${s.sponsor_id}', this)">Get link</button>`}
         </td>
       </tr>`).join("")
-    : `<tr><td colspan="4"><div class="accounts-empty">${term ? "No matches." : "No sponsors yet -- seed demo data or onboard one."}</div></td></tr>`;
+    : `<tr><td colspan="6"><div class="accounts-empty">${term ? "No matches." : "No sponsors yet -- seed demo data or onboard one."}</div></td></tr>`;
 
   pTbody.innerHTML = primaries.length
     ? primaries.map((p) => `
       <tr>
         <td class="acct-name">${escapeHtml(p.name)}</td>
         <td class="acct-id" title="${escapeHtml(p.primary_id)}">${escapeHtml(p.primary_id.slice(0, 8))}…</td>
+        <td>${emailCell(p)}</td>
+        <td>${passwordCell(p)}</td>
         <td>${escapeHtml(p.sponsor_name)}</td>
         <td>${p.profile_completed ? '<span class="badge yes">Complete</span>' : '<span class="badge no">Incomplete</span>'}</td>
         <td><button class="copy-btn" onclick="copyToClipboard('${p.primary_id}', this)">Copy</button></td>
       </tr>`).join("")
-    : `<tr><td colspan="5"><div class="accounts-empty">${term ? "No matches." : "No children yet -- redeem an invite."}</div></td></tr>`;
+    : `<tr><td colspan="7"><div class="accounts-empty">${term ? "No matches." : "No children yet -- redeem an invite."}</div></td></tr>`;
 }
 
 async function refreshAccounts() {

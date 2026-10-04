@@ -45,7 +45,7 @@ accurate even if you started something manually in a separate terminal —
 the panel will detect it and let you stop it too.
 
 Quick actions: install backend/frontend dependencies, seed demo data
-(`seed.py`), and run the backend test suite — each streams its real output
+(`seed_brahmin.py`), and run the backend test suite — each streams its real output
 into a log panel so you can see exactly what happened, not just
 pass/fail.
 

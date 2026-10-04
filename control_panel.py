@@ -79,6 +79,16 @@ CLOUDFLARED_METRICS_PORT = 8766
 PUBLIC_HOSTNAME_MSG = "chat.prashanthsridhar.com"
 PUBLIC_HOSTNAME_API = "api.prashanthsridhar.com"
 PUBLIC_HOSTNAME_APP = "app.prashanthsridhar.com"
+# WedLock IAM's own public hostname -- Go live used to only point D2M's own
+# API calls (VITE_API_BASE_URL) at the tunnel, leaving WedLock auth
+# (src/auth/WedLockAuth.js's WEDLOCK_BASE_URL) hard-defaulted to
+# http://127.0.0.1:8010. That's unreachable for anyone but this exact
+# machine, and even here it silently mixed-content-blocks: a page served
+# over https://app.prashanthsridhar.com making a plain http:// fetch gets
+# killed by the browser with no visible error beyond a generic "couldn't
+# log in" -- the actual bug this hostname (plus the CORS/env wiring below
+# and _write_frontend_env's new VITE_WEDLOCK_BASE_URL) fixes.
+PUBLIC_HOSTNAME_WEDLOCK = "auth.prashanthsridhar.com"
 
 # The backend (app/config.py) defaults its CORS allowlist to just the local
 # Vite dev origins (localhost:5173 / 127.0.0.1:5173) unless
@@ -116,6 +126,19 @@ os.environ.setdefault(
 os.environ.setdefault(
     "CORS_ORIGIN",
     f"http://localhost:5173,http://127.0.0.1:5173,http://192.168.1.41:5173,https://{PUBLIC_HOSTNAME_APP}",
+)
+
+# Same class of bug, same fix, for WedLock IAM -- its own Settings
+# (WedLockIAM/wedlock_iam/app/core/config.py) defaults cors_allowed_origins
+# to just the local Vite origins unless CORS_ALLOWED_ORIGINS is set in its
+# environment, same shape as D2M_CORS_ALLOWED_ORIGINS above. Needed once
+# WedLock IAM gets its own public hostname (PUBLIC_HOSTNAME_WEDLOCK): the
+# public app page calls auth.* directly (cross-origin from app.*), which
+# WedLock IAM's own CORS layer -- not the tunnel, not this panel -- is what
+# allows or blocks.
+os.environ.setdefault(
+    "CORS_ALLOWED_ORIGINS",
+    f"http://localhost:5173,http://127.0.0.1:5173,https://{PUBLIC_HOSTNAME_APP}",
 )
 
 
@@ -230,7 +253,7 @@ class ManagedService:
 
     # -- lifecycle --
 
-    def start(self, cmd: list[str], cwd: Path) -> str:
+    def start(self, cmd: list[str], cwd: Path, env: dict | None = None) -> str:
         with self.lock:
             self.should_run = True
             if self.process is not None and self.process.poll() is None:
@@ -263,7 +286,7 @@ class ManagedService:
 
             self.process = subprocess.Popen(
                 cmd, cwd=str(cwd), stdout=log_f, stderr=subprocess.STDOUT,
-                start_new_session=True,
+                start_new_session=True, env=env,
             )
             return f"Starting {self.name} (pid {self.process.pid})…"
 
@@ -296,10 +319,10 @@ class ManagedService:
             self.process = None
             return f"Stopped {self.name}." if killed_any else f"{self.name} wasn't running."
 
-    def restart(self, cmd: list[str], cwd: Path) -> str:
+    def restart(self, cmd: list[str], cwd: Path, env: dict | None = None) -> str:
         self.stop()
         time.sleep(0.5)
-        return self.start(cmd, cwd)
+        return self.start(cmd, cwd, env=env)
 
     @staticmethod
     def _killpg(pid: int) -> None:
@@ -407,6 +430,40 @@ def backend_start_cmd() -> list[str]:
             "--host", "127.0.0.1", "--port", str(BACKEND_PORT)]
 
 
+def _wedlock_jwt_keys_json() -> str | None:
+    """Reads WedLock IAM's own JWT_KEYS_JSON straight out of its .env, so
+    the backend can verify the bearer tokens WedLock issues without
+    hand-duplicating that secret here (drifts out of sync otherwise -- see
+    _reconcile_otp_gateway_api_key's docstring for the same concern with a
+    different pair of settings). Deliberately NOT read into the backend's
+    own d2m_core_engine/.env: that file is also loaded by the test suite
+    (pytest imports app.config the same way the live server does), and
+    setting D2M_AUTH_JWT_KEYS_JSON there disables the X-D2M-User-Id dev/
+    test fallback for every authenticated endpoint, not just
+    WedLock-authenticated ones -- see app/auth.py's get_current_user and
+    d2m_core_engine/.env's own comment on this. This only ever reaches the
+    ONE subprocess actually serving live traffic (backend_env() below),
+    never a pytest run.
+    """
+    env_path = WEDLOCK_IAM_DIR / ".env"
+    if not env_path.exists():
+        return None
+    for line in env_path.read_text().splitlines():
+        if line.startswith("JWT_KEYS_JSON="):
+            return line.split("=", 1)[1].strip()
+    return None
+
+
+def backend_env() -> dict:
+    """Env for the live backend subprocess only -- see
+    _wedlock_jwt_keys_json's docstring for why this never touches .env."""
+    env = os.environ.copy()
+    keys_json = _wedlock_jwt_keys_json()
+    if keys_json:
+        env["D2M_AUTH_JWT_KEYS_JSON"] = keys_json
+    return env
+
+
 def frontend_start_cmd() -> list[str]:
     # --host 127.0.0.1 pins Vite to the IPv4 loopback explicitly. Without
     # it, Vite binds whatever `localhost` resolves to via Node's own DNS
@@ -491,6 +548,7 @@ def _ensure_cloudflared_config() -> tuple[bool, str]:
         (PUBLIC_HOSTNAME_MSG, MESSAGING_PORT),
         (PUBLIC_HOSTNAME_API, BACKEND_PORT),
         (PUBLIC_HOSTNAME_APP, FRONTEND_PORT),
+        (PUBLIC_HOSTNAME_WEDLOCK, WEDLOCK_IAM_PORT),
     ]
     notes = []
 
@@ -566,11 +624,11 @@ def _cloudflared_cleanup(log) -> None:
 
 def _ensure_cloudflared_dns_routes(log) -> None:
     """`tunnel route dns` is safe to re-run -- it just reports the record
-    already exists if it does. Runs it for api./app. every time Go live
-    fires rather than only once, so a hostname added to config.yml above
-    but never routed in DNS (e.g. api. was set up by hand in an earlier
-    session, app. never was) gets caught automatically."""
-    for hostname in (PUBLIC_HOSTNAME_API, PUBLIC_HOSTNAME_APP):
+    already exists if it does. Runs it for api./app./auth. every time Go
+    live fires rather than only once, so a hostname added to config.yml
+    above but never routed in DNS (e.g. api. was set up by hand in an
+    earlier session, app. never was) gets caught automatically."""
+    for hostname in (PUBLIC_HOSTNAME_API, PUBLIC_HOSTNAME_APP, PUBLIC_HOSTNAME_WEDLOCK):
         log(f"Ensuring DNS route for {hostname}…")
         try:
             out = subprocess.run(
@@ -643,7 +701,7 @@ def reset_data() -> str:
         msg = f"No database file found at {db_path} -- nothing to reset."
 
     if was_running:
-        start_msg = backend.start(backend_start_cmd(), BACKEND_DIR)
+        start_msg = backend.start(backend_start_cmd(), BACKEND_DIR, env=backend_env())
         msg += f" {start_msg} A fresh empty database is created automatically on startup."
     else:
         msg += " Start the backend when ready -- a fresh empty database is created automatically."
@@ -704,7 +762,19 @@ ACTIONS = {
         "Install frontend dependencies", ["npm", "install"], FRONTEND_DIR,
     ),
     "seed": lambda: run_activity_async(
-        "Seed demo data", [_backend_python(), "seed.py"], BACKEND_DIR,
+        "Seed demo data", [_backend_python(), "seed_brahmin.py"], BACKEND_DIR,
+    ),
+    # Same demo-data idea as "seed" above, but every account is a real
+    # WedLock IAM account with a known email+password -- see
+    # scripts/seed_demo_wedlock_accounts.py's own docstring. That's what
+    # lets the Accounts tab's Login column show credentials that actually
+    # work in the real Login screen (WedLockAuthForm), which plain "seed"
+    # (D2M-native Sponsor/Primary rows, no WedLock account at all) can't.
+    # Needs WedLock IAM + email_otp running first -- the script itself
+    # checks and reports that clearly rather than this lambda guessing.
+    "seed_wedlock_accounts": lambda: run_activity_async(
+        "Seed demo accounts (WedLock logins)",
+        [_backend_python(), "scripts/seed_demo_wedlock_accounts.py"], BACKEND_DIR,
     ),
     "test": lambda: run_activity_async(
         "Run backend tests", [_backend_python(), "-m", "pytest", "-q"], BACKEND_DIR,
@@ -781,12 +851,20 @@ def _write_frontend_env(public: bool) -> None:
             f"VITE_API_BASE_URL=https://{PUBLIC_HOSTNAME_API}\n"
             f"VITE_MSG_SERVER_URL=https://{PUBLIC_HOSTNAME_MSG}\n"
             f"VITE_MSG_WS_URL=wss://{PUBLIC_HOSTNAME_MSG}\n"
+            # WedLock auth (src/auth/WedLockAuth.js's WEDLOCK_BASE_URL)
+            # otherwise stays hard-defaulted to http://127.0.0.1:8010 even
+            # in public mode -- unreachable off this machine, and even here
+            # a mixed-content block once the page itself is served over
+            # https. See PUBLIC_HOSTNAME_WEDLOCK's own comment above for
+            # the full story.
+            f"VITE_WEDLOCK_BASE_URL=https://{PUBLIC_HOSTNAME_WEDLOCK}/api/v1\n"
         )
     else:
         content = (
             f"VITE_API_BASE_URL={BACKEND_URL}\n"
             f"VITE_MSG_SERVER_URL={MESSAGING_URL}\n"
             f"VITE_MSG_WS_URL=ws://127.0.0.1:{MESSAGING_PORT}\n"
+            f"VITE_WEDLOCK_BASE_URL={WEDLOCK_IAM_URL}/api/v1\n"
         )
     FRONTEND_ENV_PATH.write_text(content)
 
@@ -834,7 +912,7 @@ def _run_go_live() -> None:
     except Exception as e:
         _activity_log(f"Docker compose failed: {e} -- is Docker Desktop running?")
 
-    _activity_log(backend.start(backend_start_cmd(), BACKEND_DIR))
+    _activity_log(backend.start(backend_start_cmd(), BACKEND_DIR, env=backend_env()))
     _activity_log(messaging.start(messaging_start_cmd(), MESSAGING_DIR))
 
     _activity_log("Pointing the frontend at the public URLs…")
@@ -1103,12 +1181,12 @@ def _watchdog_targets() -> list[tuple[ManagedService, list[str], Path]]:
     locally, preview server while a public demo link is live) -- a stale
     static list would revive a crashed frontend into the wrong mode."""
     return [
-        (backend, backend_start_cmd(), BACKEND_DIR),
-        (frontend, frontend_preview_cmd() if _public_mode else frontend_start_cmd(), FRONTEND_DIR),
-        (messaging, messaging_start_cmd(), MESSAGING_DIR),
-        (wedlock_iam, wedlock_iam_start_cmd(), WEDLOCK_IAM_DIR),
-        (wedlock_email_otp, wedlock_email_otp_start_cmd(), WEDLOCK_EMAIL_OTP_DIR),
-        (wedlock_otp_gateway, wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR),
+        (backend, backend_start_cmd(), BACKEND_DIR, backend_env()),
+        (frontend, frontend_preview_cmd() if _public_mode else frontend_start_cmd(), FRONTEND_DIR, None),
+        (messaging, messaging_start_cmd(), MESSAGING_DIR, None),
+        (wedlock_iam, wedlock_iam_start_cmd(), WEDLOCK_IAM_DIR, None),
+        (wedlock_email_otp, wedlock_email_otp_start_cmd(), WEDLOCK_EMAIL_OTP_DIR, None),
+        (wedlock_otp_gateway, wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR, None),
     ]
 
 
@@ -1133,9 +1211,9 @@ def _watchdog_loop() -> None:
         try:
             targets = _watchdog_targets()
             if cloudflared.should_run:
-                targets = targets + [(cloudflared, [], Path.home())]  # cmd/cwd unused for cloudflared, see below
+                targets = targets + [(cloudflared, [], Path.home(), None)]  # cmd/cwd unused for cloudflared, see below
 
-            for svc, cmd, cwd in targets:
+            for svc, cmd, cwd, env in targets:
                 if not svc.should_run:
                     continue
                 state = svc.status()["state"]
@@ -1164,7 +1242,7 @@ def _watchdog_loop() -> None:
                 if svc is cloudflared:
                     _watchdog_heal_cloudflared()
                 else:
-                    svc.start(cmd, cwd)
+                    svc.start(cmd, cwd, env=env)
 
                 if count == WATCHDOG_MAX_CONSECUTIVE_RESTARTS:
                     with open(svc.log_path, "a") as f:
@@ -1527,11 +1605,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/api/backend/start":
-            return self._json({"message": backend.start(backend_start_cmd(), BACKEND_DIR)})
+            return self._json({"message": backend.start(backend_start_cmd(), BACKEND_DIR, env=backend_env())})
         if self.path == "/api/backend/stop":
             return self._json({"message": backend.stop()})
         if self.path == "/api/backend/restart":
-            return self._json({"message": backend.restart(backend_start_cmd(), BACKEND_DIR)})
+            return self._json({"message": backend.restart(backend_start_cmd(), BACKEND_DIR, env=backend_env())})
 
         if self.path == "/api/frontend/start":
             return self._json({"message": frontend.start(frontend_start_cmd(), FRONTEND_DIR)})
