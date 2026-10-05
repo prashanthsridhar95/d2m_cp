@@ -90,6 +90,23 @@ PUBLIC_HOSTNAME_APP = "app.prashanthsridhar.com"
 # and _write_frontend_env's new VITE_WEDLOCK_BASE_URL) fixes.
 PUBLIC_HOSTNAME_WEDLOCK = "auth.prashanthsridhar.com"
 
+# d2m_web's Google Sign-In client (src/auth/googleIdentity.js's
+# VITE_GOOGLE_CLIENT_ID) -- a Web-application-type OAuth client id, not a
+# secret the way its paired client_secret is (Google's own docs: a
+# browser-side/public client's client_id is not confidential). Hardcoded
+# here for the same reason d2m_mobile's GoogleSignInConfig.kt hardcodes
+# its own ANDROID_CLIENT_ID/IOS_CLIENT_ID as real source values rather
+# than reading them from an env var -- this is in fact the SAME web
+# client as that file's ANDROID_CLIENT_ID (Android's Credential Manager
+# needs a web-type client id, not an Android-type one, so one web client
+# already covers both). Belongs here, not only in a hand-edited .env,
+# because _write_frontend_env below fully overwrites FRONTEND_ENV_PATH on
+# every local-dev and Go-live start -- a value added by hand to .env
+# directly is silently wiped the next time this panel (re)starts the
+# frontend, which is exactly what happened the first time this was set
+# that way.
+GOOGLE_WEB_CLIENT_ID = "835063984447-poe8is01fjqen38lko8m789c2me2bb3m.apps.googleusercontent.com"
+
 # The backend (app/config.py) defaults its CORS allowlist to just the local
 # Vite dev origins (localhost:5173 / 127.0.0.1:5173) unless
 # D2M_CORS_ALLOWED_ORIGINS is set in its environment. uvicorn is always
@@ -858,6 +875,7 @@ def _write_frontend_env(public: bool) -> None:
             # https. See PUBLIC_HOSTNAME_WEDLOCK's own comment above for
             # the full story.
             f"VITE_WEDLOCK_BASE_URL=https://{PUBLIC_HOSTNAME_WEDLOCK}/api/v1\n"
+            f"VITE_GOOGLE_CLIENT_ID={GOOGLE_WEB_CLIENT_ID}\n"
         )
     else:
         content = (
@@ -865,6 +883,7 @@ def _write_frontend_env(public: bool) -> None:
             f"VITE_MSG_SERVER_URL={MESSAGING_URL}\n"
             f"VITE_MSG_WS_URL=ws://127.0.0.1:{MESSAGING_PORT}\n"
             f"VITE_WEDLOCK_BASE_URL={WEDLOCK_IAM_URL}/api/v1\n"
+            f"VITE_GOOGLE_CLIENT_ID={GOOGLE_WEB_CLIENT_ID}\n"
         )
     FRONTEND_ENV_PATH.write_text(content)
 
