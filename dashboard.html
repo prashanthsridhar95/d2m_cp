@@ -303,6 +303,28 @@
   .acct-login-pw { font-family: var(--mono); font-size: 11px; margin-right: 8px; }
   .acct-login-none { font-size: 11px; color: var(--muted); font-style: italic; }
 
+  /* ---- Analytics tab ---- */
+  .funnel-generated-at { font-size: 11.5px; color: var(--muted); margin: -8px 0 14px; }
+  .funnel-stage {
+    padding: 12px 16px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    margin-bottom: 10px;
+  }
+  .funnel-stage:last-child { margin-bottom: 0; }
+  .funnel-stage-row { display: flex; align-items: baseline; justify-content: space-between; }
+  .funnel-stage-label { font-size: 13.5px; color: var(--text); }
+  .funnel-stage-value { font-size: 16px; font-weight: 700; }
+  .funnel-bar-track {
+    margin-top: 8px;
+    height: 6px;
+    border-radius: 99px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .funnel-bar-fill { height: 100%; background: var(--accent); border-radius: 99px; }
+
   .danger-card { border-color: rgba(255,69,58,0.3); }
   .danger-card .meta { margin-bottom: 14px; }
   #reset-msg {
@@ -366,6 +388,7 @@
   <nav class="tab-nav">
     <button class="tab-btn active" id="tab-btn-dashboard" onclick="showTab('dashboard')">Dashboard</button>
     <button class="tab-btn" id="tab-btn-accounts" onclick="showTab('accounts')">Accounts</button>
+    <button class="tab-btn" id="tab-btn-analytics" onclick="showTab('analytics')">Analytics</button>
     <button class="tab-btn" id="tab-btn-diagnostics" onclick="showTab('diagnostics')">Diagnostics</button>
     <button class="tab-btn" id="tab-btn-watermark" onclick="showTab('watermark')">Watermark</button>
     <button class="tab-btn" id="tab-btn-sharelinks" onclick="showTab('sharelinks')">Share Links</button>
@@ -677,6 +700,23 @@
     </section>
   </div>
 
+  <!-- ============================= Analytics tab ============================= -->
+  <div class="tab-panel grid-main" id="tab-analytics">
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Funnel analytics</span></div>
+        <button class="copy-btn" onclick="refreshAnalytics()">Refresh</button>
+      </div>
+      <div class="meta">
+        Signups through to a confirmed union -- real GET /admin/analytics/funnel counts, not guesses. Each
+        stage counts every profile that ever reached it (a later Serious Mode revoke or union offboarding
+        doesn't un-count it), not a live snapshot of current state.
+      </div>
+      <div id="funnel-generated-at" class="funnel-generated-at"></div>
+      <div id="funnel-stages"></div>
+    </section>
+  </div>
+
   <footer id="paths-footer"></footer>
 
 <script>
@@ -945,6 +985,66 @@ async function refreshAccounts() {
   renderAccounts();
 }
 
+// ---- Analytics tab -------------------------------------------------------
+// Sourced from the backend's dev-only GET /admin/analytics/funnel via the
+// control panel's own /api/analytics/funnel proxy (see control_panel.py's
+// fetch_funnel_analytics()). Bar width is relative to sponsors_total (the
+// top of the funnel) -- a quick visual sense of where the biggest drop-off
+// is, not a precise chart.
+const FUNNEL_STAGES = [
+  ["sponsors_total", "Sponsors signed up"],
+  ["primaries_total", "Children onboarded"],
+  ["profiles_complete", "Profiles complete"],
+  ["primaries_with_a_suggestion", "Received a suggestion"],
+  ["primaries_with_a_vouch", "Have a vouch"],
+  ["primaries_matched", "Reached a match"],
+  ["primaries_reached_serious_mode", "Reached Serious Mode"],
+  ["unions_confirmed", "Unions confirmed"],
+];
+
+let analyticsData = null;
+
+function renderAnalytics() {
+  const genAt = document.getElementById("funnel-generated-at");
+  const stagesEl = document.getElementById("funnel-stages");
+
+  if (!analyticsData) {
+    genAt.textContent = "";
+    stagesEl.innerHTML = '<div class="accounts-empty">Loading…</div>';
+    return;
+  }
+  if (analyticsData.error) {
+    genAt.textContent = "";
+    stagesEl.innerHTML = `<div class="accounts-error">${escapeHtml(analyticsData.error)}</div>`;
+    return;
+  }
+
+  genAt.textContent = `As of ${new Date(analyticsData.generated_at).toLocaleString()}`;
+  const top = analyticsData.sponsors_total || 1; // guards divide-by-zero on an empty DB, not a real bound
+  stagesEl.innerHTML = FUNNEL_STAGES.map(([key, label]) => {
+    const value = analyticsData[key] ?? 0;
+    const pct = Math.min(100, Math.round((value / top) * 100));
+    return `
+      <div class="funnel-stage">
+        <div class="funnel-stage-row">
+          <span class="funnel-stage-label">${escapeHtml(label)}</span>
+          <span class="funnel-stage-value">${value}</span>
+        </div>
+        <div class="funnel-bar-track"><div class="funnel-bar-fill" style="width: ${pct}%;"></div></div>
+      </div>`;
+  }).join("");
+}
+
+async function refreshAnalytics() {
+  try {
+    const res = await fetch("/api/analytics/funnel");
+    analyticsData = await res.json();
+  } catch (e) {
+    analyticsData = { error: "Control panel couldn't reach the backend." };
+  }
+  renderAnalytics();
+}
+
 function renderMatchDirection(label, direction) {
   const status = direction.would_appear_in_discover
     ? '<span class="badge yes">Would appear in Discover</span>'
@@ -1191,8 +1291,10 @@ function toggleShareLinkRow(linkId, nextIsActive) {
 
 refresh();
 refreshAccounts();
+refreshAnalytics();
 setInterval(refresh, 2000);
 setInterval(refreshAccounts, 4000);
+setInterval(refreshAnalytics, 4000);
 </script>
 </body>
 </html>

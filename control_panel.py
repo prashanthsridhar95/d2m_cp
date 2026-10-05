@@ -1397,6 +1397,25 @@ def fetch_accounts() -> dict:
         return {"error": "Backend isn't reachable -- start it first."}
 
 
+def fetch_funnel_analytics() -> dict:
+    """
+    Server-side proxy to GET /admin/analytics/funnel -- same CORS-
+    avoidance reasoning as fetch_accounts() above. Signups -> profile
+    complete -> first suggestion -> first vouch -> first match -> Serious
+    Mode -> union, as real counts instead of guesses.
+    """
+    try:
+        with urllib.request.urlopen(f"{BACKEND_URL}/admin/analytics/funnel", timeout=2) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"error": "Not available -- /admin/analytics/funnel isn't registered "
+                              "(this happens if D2M_ENVIRONMENT=production is set)."}
+        return {"error": f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
 def fetch_invite_link(sponsor_id: str) -> dict:
     """
     Server-side proxy to POST /admin/sponsors/{id}/invite-link -- recovers
@@ -1607,6 +1626,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/api/accounts":
             return self._json(fetch_accounts())
+
+        if self.path == "/api/analytics/funnel":
+            return self._json(fetch_funnel_analytics())
 
         if self.path.startswith("/api/match-diagnostic/"):
             parts = self.path[len("/api/match-diagnostic/"):].split("/")
