@@ -1416,6 +1416,53 @@ def fetch_funnel_analytics() -> dict:
         return {"error": "Backend isn't reachable -- start it first."}
 
 
+def fetch_founding_member_cutoff() -> dict:
+    """
+    Server-side proxy to GET /admin/settings/founding-member-cutoff --
+    same CORS-avoidance reasoning as fetch_accounts() above. Powers the
+    Settings tab's "Founding member cutoff" field -- "Keep it customisable
+    in the control panel," reported directly, rather than hardcoding N.
+    """
+    try:
+        with urllib.request.urlopen(f"{BACKEND_URL}/admin/settings/founding-member-cutoff", timeout=2) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"error": "Not available -- /admin/settings/founding-member-cutoff isn't registered "
+                              "(this happens if D2M_ENVIRONMENT=production is set)."}
+        return {"error": f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
+def set_founding_member_cutoff(cutoff: int) -> dict:
+    """
+    Server-side proxy to PUT /admin/settings/founding-member-cutoff -- same
+    POST-drives-a-real-PUT indirection toggle_share_link() already uses
+    (this stdlib server only implements do_GET/do_POST). The backend
+    recomputes every Primary's founding_member flag against the new
+    cutoff immediately, so the response's founding_member_count reflects
+    the save right away.
+    """
+    data = json.dumps({"cutoff": cutoff}).encode()
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/admin/settings/founding-member-cutoff", method="PUT", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        return {"error": detail or f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
 def fetch_invite_link(sponsor_id: str) -> dict:
     """
     Server-side proxy to POST /admin/sponsors/{id}/invite-link -- recovers
@@ -1630,6 +1677,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/analytics/funnel":
             return self._json(fetch_funnel_analytics())
 
+        if self.path == "/api/settings/founding-member-cutoff":
+            return self._json(fetch_founding_member_cutoff())
+
         if self.path.startswith("/api/match-diagnostic/"):
             parts = self.path[len("/api/match-diagnostic/"):].split("/")
             if len(parts) != 2 or not all(parts):
@@ -1705,6 +1755,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "Malformed request body."}, status=400)
             return self._json(reveal_watermark(body))
+
+        if self.path == "/api/settings/founding-member-cutoff":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                return self._json({"error": "Malformed request body."}, status=400)
+            try:
+                cutoff = int(body.get("cutoff"))
+            except (TypeError, ValueError):
+                return self._json({"error": "cutoff must be a whole number."}, status=400)
+            return self._json(set_founding_member_cutoff(cutoff))
 
         if self.path == "/api/reset-data":
             return self._json({"message": reset_data()})

@@ -715,6 +715,23 @@
       <div id="funnel-generated-at" class="funnel-generated-at"></div>
       <div id="funnel-stages"></div>
     </section>
+
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>Founding member cutoff</span></div>
+      </div>
+      <div class="meta">
+        The first N accounts by signup order get the "Founding member" badge, via
+        PUT /admin/settings/founding-member-cutoff. Saving recomputes every account's badge
+        against the new N immediately -- "Keep it customisable in the control panel," reported
+        directly, rather than hardcoding it.
+      </div>
+      <div style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+        <input type="number" id="founding-cutoff-input" min="0" step="1" style="width: 120px;" />
+        <button class="copy-btn" onclick="saveFoundingMemberCutoff()">Save</button>
+      </div>
+      <div id="founding-cutoff-status" class="meta" style="margin-top: 8px;"></div>
+    </section>
   </div>
 
   <footer id="paths-footer"></footer>
@@ -1045,6 +1062,52 @@ async function refreshAnalytics() {
   renderAnalytics();
 }
 
+// ---- Founding member cutoff ----------------------------------------------
+async function refreshFoundingMemberCutoff() {
+  const statusEl = document.getElementById("founding-cutoff-status");
+  const inputEl = document.getElementById("founding-cutoff-input");
+  statusEl.textContent = "Loading…";
+  try {
+    const res = await fetch("/api/settings/founding-member-cutoff");
+    const data = await res.json();
+    if (data.error) {
+      statusEl.textContent = data.error;
+      return;
+    }
+    inputEl.value = data.cutoff;
+    statusEl.textContent = `${data.founding_member_count} account(s) currently flagged as founding members.`;
+  } catch (e) {
+    statusEl.textContent = "Control panel couldn't reach the backend.";
+  }
+}
+
+async function saveFoundingMemberCutoff() {
+  const statusEl = document.getElementById("founding-cutoff-status");
+  const inputEl = document.getElementById("founding-cutoff-input");
+  const cutoff = parseInt(inputEl.value, 10);
+  if (Number.isNaN(cutoff) || cutoff < 0) {
+    statusEl.textContent = "Enter a whole number (0 or more).";
+    return;
+  }
+  statusEl.textContent = "Saving…";
+  try {
+    const res = await fetch("/api/settings/founding-member-cutoff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cutoff }),
+    });
+    const data = await res.json();
+    if (data.error) {
+      statusEl.textContent = data.error;
+      return;
+    }
+    inputEl.value = data.cutoff;
+    statusEl.textContent = `Saved. ${data.founding_member_count} account(s) now flagged as founding members.`;
+  } catch (e) {
+    statusEl.textContent = "Control panel couldn't reach the backend.";
+  }
+}
+
 function renderMatchDirection(label, direction) {
   const status = direction.would_appear_in_discover
     ? '<span class="badge yes">Would appear in Discover</span>'
@@ -1292,6 +1355,7 @@ function toggleShareLinkRow(linkId, nextIsActive) {
 refresh();
 refreshAccounts();
 refreshAnalytics();
+refreshFoundingMemberCutoff();
 setInterval(refresh, 2000);
 setInterval(refreshAccounts, 4000);
 setInterval(refreshAnalytics, 4000);
