@@ -392,6 +392,7 @@
     <button class="tab-btn" id="tab-btn-diagnostics" onclick="showTab('diagnostics')">Diagnostics</button>
     <button class="tab-btn" id="tab-btn-watermark" onclick="showTab('watermark')">Watermark</button>
     <button class="tab-btn" id="tab-btn-sharelinks" onclick="showTab('sharelinks')">Share Links</button>
+    <button class="tab-btn" id="tab-btn-verification" onclick="showTab('verification')">Verification</button>
   </nav>
 
   <!-- ============================= Dashboard tab ============================= -->
@@ -697,6 +698,49 @@
         <thead><tr><th>Code (hover for URL)</th><th>Detail</th><th>Status</th><th>Expires</th><th>Views</th><th>Last viewed</th><th></th></tr></thead>
         <tbody id="sl-tbody"></tbody>
       </table>
+    </section>
+  </div>
+
+  <!-- ============================= Verification tab ============================= -->
+  <div class="tab-panel grid-main" id="tab-verification">
+    <section class="card actions-card">
+      <div class="card-header">
+        <div class="service-title"><span>KYC review queue</span></div>
+        <button class="copy-btn" onclick="refreshIdentityVerifications()">Refresh</button>
+      </div>
+      <div class="meta">
+        "Verified" badge submissions (one govt photo ID + one selfie per submission) -- admin-reviewed only,
+        there is no user-facing approve/reject UI. Approving sets Primary.is_verified immediately.
+      </div>
+      <div id="iv-status" class="meta"></div>
+      <table class="accounts-table" id="iv-table" style="display:none;">
+        <thead><tr><th>Name</th><th>Document type</th><th>Submitted</th><th></th></tr></thead>
+        <tbody id="iv-tbody"></tbody>
+      </table>
+    </section>
+
+    <section class="card actions-card" id="iv-detail" style="display:none;">
+      <div class="card-header">
+        <div class="service-title"><span>Review submission</span></div>
+      </div>
+      <div class="wm-metrics">
+        <div class="wm-metric">
+          <div class="label">Document (<span id="iv-doc-type">—</span>)</div>
+          <img id="iv-doc-img" style="max-width: 100%; border-radius: 8px; margin-top: 6px;" />
+        </div>
+        <div class="wm-metric">
+          <div class="label">Selfie</div>
+          <img id="iv-selfie-img" style="max-width: 100%; border-radius: 8px; margin-top: 6px;" />
+        </div>
+      </div>
+      <div class="wm-controls" style="margin-top: 14px;">
+        <input class="search-input" id="iv-reject-reason" type="text" placeholder="Rejection reason (optional)" style="width: 320px;" />
+      </div>
+      <div class="wm-controls" style="margin-top: 10px;">
+        <button class="primary" onclick="decideIdentityVerification('approve')">Approve</button>
+        <button onclick="decideIdentityVerification('reject')">Reject</button>
+      </div>
+      <div id="iv-decide-status" class="meta"></div>
     </section>
   </div>
 
@@ -1352,10 +1396,95 @@ function toggleShareLinkRow(linkId, nextIsActive) {
     });
 }
 
+// ---- Identity verification (KYC "Verified" badge review queue) -----------
+let ivSelectedId = null;
+
+function refreshIdentityVerifications() {
+  const statusEl = document.getElementById("iv-status");
+  const table = document.getElementById("iv-table");
+  const tbody = document.getElementById("iv-tbody");
+  statusEl.textContent = "Loading…";
+  table.style.display = "none";
+  document.getElementById("iv-detail").style.display = "none";
+  ivSelectedId = null;
+
+  fetch("/api/identity-verifications")
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        statusEl.textContent = data.error;
+        return;
+      }
+      const rows = data.verifications || [];
+      statusEl.textContent = rows.length ? "" : "No submissions pending review.";
+      if (!rows.length) return;
+      table.style.display = "";
+      tbody.innerHTML = rows.map((v) => `
+        <tr>
+          <td>${escapeHtml(v.candidate_name)}</td>
+          <td>${escapeHtml(v.document_type)}</td>
+          <td>${escapeHtml(v.submitted_at.slice(0, 16))}</td>
+          <td><button onclick="reviewIdentityVerification('${v.id}', '${escapeHtml(v.document_type)}')">Review</button></td>
+        </tr>`).join("");
+    })
+    .catch(() => {
+      statusEl.textContent = "Couldn't reach the control panel.";
+    });
+}
+
+function reviewIdentityVerification(verificationId, documentType) {
+  ivSelectedId = verificationId;
+  document.getElementById("iv-detail").style.display = "";
+  document.getElementById("iv-doc-type").textContent = documentType;
+  document.getElementById("iv-reject-reason").value = "";
+  document.getElementById("iv-decide-status").textContent = "";
+  const docImg = document.getElementById("iv-doc-img");
+  const selfieImg = document.getElementById("iv-selfie-img");
+  docImg.src = "";
+  selfieImg.src = "";
+
+  fetch(`/api/identity-verifications/${encodeURIComponent(verificationId)}/image/document`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (!data.error) docImg.src = `data:${data.content_type};base64,${data.image_base64}`;
+    });
+  fetch(`/api/identity-verifications/${encodeURIComponent(verificationId)}/image/selfie`)
+    .then((r) => r.json())
+    .then((data) => {
+      if (!data.error) selfieImg.src = `data:${data.content_type};base64,${data.image_base64}`;
+    });
+}
+
+function decideIdentityVerification(decision) {
+  if (!ivSelectedId) return;
+  const statusEl = document.getElementById("iv-decide-status");
+  const reason = document.getElementById("iv-reject-reason").value.trim();
+  statusEl.textContent = decision === "approve" ? "Approving…" : "Rejecting…";
+
+  fetch(`/api/identity-verifications/${encodeURIComponent(ivSelectedId)}/${decision}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(decision === "reject" ? { reason: reason || null } : {}),
+  })
+    .then((r) => r.json())
+    .then((data) => {
+      if (data.error) {
+        statusEl.textContent = data.error;
+        return;
+      }
+      statusEl.textContent = `Done -- ${data.status}.`;
+      refreshIdentityVerifications();
+    })
+    .catch(() => {
+      statusEl.textContent = "Couldn't reach the control panel.";
+    });
+}
+
 refresh();
 refreshAccounts();
 refreshAnalytics();
 refreshFoundingMemberCutoff();
+refreshIdentityVerifications();
 setInterval(refresh, 2000);
 setInterval(refreshAccounts, 4000);
 setInterval(refreshAnalytics, 4000);

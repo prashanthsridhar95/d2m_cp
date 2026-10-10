@@ -1463,6 +1463,70 @@ def set_founding_member_cutoff(cutoff: int) -> dict:
         return {"error": "Backend isn't reachable -- start it first."}
 
 
+def fetch_pending_identity_verifications() -> dict:
+    """
+    Server-side proxy to GET /admin/identity-verifications -- the KYC
+    "Verified" badge review queue (Phase 3 of the backlog this session is
+    working, confirmed scope: one govt photo ID + one selfie, admin-
+    reviewed via the control panel only). Same GET-list proxy shape as
+    fetch_share_links() above.
+    """
+    try:
+        with urllib.request.urlopen(f"{BACKEND_URL}/admin/identity-verifications", timeout=3) as resp:
+            return {"verifications": json.loads(resp.read())}
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return {"error": "Not available -- /admin/identity-verifications isn't registered "
+                              "(this happens if D2M_ENVIRONMENT=production is set)."}
+        return {"error": f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
+def fetch_identity_verification_image(verification_id: str, which: str) -> dict:
+    """Server-side proxy to GET /admin/identity-verifications/{id}/image --
+    base64-in-JSON, same shape the backend already returns (and the same
+    convention reveal_watermark() above uses for the other direction)."""
+    url = f"{BACKEND_URL}/admin/identity-verifications/{verification_id}/image?which={which}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        return {"error": detail or f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
+def decide_identity_verification(verification_id: str, decision: str, reason: str | None) -> dict:
+    """Server-side proxy to POST /admin/identity-verifications/{id}/approve
+    or .../reject -- `decision` is "approve" or "reject". On approval, the
+    backend sets Primary.is_verified immediately, so every suggestion/
+    browse/profile-read surface picks up the badge right away."""
+    path = "approve" if decision == "approve" else "reject"
+    data = json.dumps({"reason": reason} if decision == "reject" else {}).encode()
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/admin/identity-verifications/{verification_id}/{path}", method="POST", data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        detail = None
+        try:
+            detail = json.loads(e.read()).get("detail")
+        except Exception:
+            pass
+        return {"error": detail or f"Backend returned HTTP {e.code}."}
+    except Exception:
+        return {"error": "Backend isn't reachable -- start it first."}
+
+
 def fetch_invite_link(sponsor_id: str) -> dict:
     """
     Server-side proxy to POST /admin/sponsors/{id}/invite-link -- recovers
@@ -1680,6 +1744,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/settings/founding-member-cutoff":
             return self._json(fetch_founding_member_cutoff())
 
+        if self.path == "/api/identity-verifications":
+            return self._json(fetch_pending_identity_verifications())
+
+        if self.path.startswith("/api/identity-verifications/") and "/image/" in self.path:
+            parts = self.path[len("/api/identity-verifications/"):].split("/image/")
+            if len(parts) != 2 or not all(parts) or parts[1] not in ("document", "selfie"):
+                return self._json({"error": "Need a verification id and which=document|selfie."}, status=400)
+            return self._json(fetch_identity_verification_image(parts[0], parts[1]))
+
         if self.path.startswith("/api/match-diagnostic/"):
             parts = self.path[len("/api/match-diagnostic/"):].split("/")
             if len(parts) != 2 or not all(parts):
@@ -1767,6 +1840,21 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return self._json({"error": "cutoff must be a whole number."}, status=400)
             return self._json(set_founding_member_cutoff(cutoff))
+
+        if self.path.startswith("/api/identity-verifications/") and (
+            self.path.endswith("/approve") or self.path.endswith("/reject")
+        ):
+            decision = "approve" if self.path.endswith("/approve") else "reject"
+            suffix = f"/{decision}"
+            verification_id = self.path[len("/api/identity-verifications/"):-len(suffix)]
+            if not verification_id:
+                return self._json({"error": "Need a verification id."}, status=400)
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                return self._json({"error": "Malformed request body."}, status=400)
+            return self._json(decide_identity_verification(verification_id, decision, body.get("reason")))
 
         if self.path == "/api/reset-data":
             return self._json({"message": reset_data()})
