@@ -28,7 +28,12 @@
   }
   header {
     padding: 28px 32px 8px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
   }
+  .header-actions { flex-shrink: 0; }
   header h1 {
     margin: 0;
     font-size: 22px;
@@ -381,8 +386,13 @@
 </head>
 <body>
   <header>
-    <h1>D2M Control Panel</h1>
-    <p>Backend, frontend, messaging, and WedLock IAM dev servers for the D2M matrimony platform, in one place.</p>
+    <div>
+      <h1>D2M Control Panel</h1>
+      <p>Backend, frontend, messaging, and WedLock IAM dev servers for the D2M matrimony platform, in one place.</p>
+    </div>
+    <div class="header-actions">
+      <button class="primary" id="open-testsuite-btn" onclick="openTestSuite(this)">Open Test Suite ↗</button>
+    </div>
   </header>
 
   <nav class="tab-nav">
@@ -558,6 +568,29 @@
           <button onclick="copyLog('wedlock_otp_gateway-log', this)">Copy log</button>
         </div>
         <div class="log" id="wedlock_otp_gateway-log"><span class="log-empty">No output yet.</span></div>
+      </div>
+    </section>
+
+    <section class="card collapsible-card collapsed" id="testsuite-card">
+      <div class="card-header" onclick="toggleCard('testsuite-card')">
+        <div class="service-title">
+          <span class="chevron">▾</span>
+          <span class="dot stopped" id="testsuite-dot"></span>
+          <span>Test Suite</span>
+        </div>
+        <span class="state-label" id="testsuite-state">—</span>
+      </div>
+      <div class="meta" id="testsuite-meta">127.0.0.1:8770</div>
+      <div class="card-body">
+        <div class="meta">Smoke / sanity / regression / e2e runner for every repo -- pick what to run, watch it live, browse the 600+ test cases and known defects. Runs against whatever is up on this Mac.</div>
+        <div class="buttons">
+          <button class="primary" onclick="callAction('/api/testsuite/start')">Start</button>
+          <button onclick="window.open('http://127.0.0.1:8770/', '_blank')">Open Tests ↗</button>
+          <button onclick="callAction('/api/testsuite/restart')">Restart</button>
+          <button class="danger" onclick="callAction('/api/testsuite/stop')">Stop</button>
+          <button onclick="copyLog('testsuite-log', this)">Copy log</button>
+        </div>
+        <div class="log" id="testsuite-log"><span class="log-empty">No output yet.</span></div>
       </div>
     </section>
 
@@ -831,6 +864,7 @@ async function refresh() {
     renderService("wedlock_iam", data.wedlock_iam);
     renderService("wedlock_email_otp", data.wedlock_email_otp);
     renderService("wedlock_otp_gateway", data.wedlock_otp_gateway);
+    renderService("testsuite", data.testsuite);
 
     const liveLinkMeta = document.getElementById("live-link-meta");
     if (data.cloudflared.state === "healthy" || data.cloudflared.state === "running_unmanaged") {
@@ -854,6 +888,38 @@ async function refresh() {
   } catch (e) {
     // control panel server itself is down -- unlikely since we're loaded
     // from it, but fail quietly rather than spamming the console.
+  }
+}
+
+// One-click: starts the test-suite dashboard if it isn't up yet, then opens it.
+// The tab is opened synchronously (inside the click) so the popup blocker
+// allows it, then pointed at the dashboard once it answers.
+async function openTestSuite(btn) {
+  const url = "http://127.0.0.1:8770/";
+  const win = window.open("", "_blank");
+  const label = btn.textContent;
+  btn.disabled = true;
+  try {
+    let st = (await (await fetch("/api/status")).json()).testsuite;
+    if (!st || st.state !== "healthy") {
+      btn.textContent = "Starting…";
+      await fetch("/api/testsuite/start", { method: "POST" });
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        st = (await (await fetch("/api/status")).json()).testsuite;
+        if (st && st.state === "healthy") break;
+      }
+    }
+    if (st && st.state === "healthy") {
+      if (win) win.location.href = url; else window.open(url, "_blank");
+    } else {
+      if (win) win.close();
+      alert("The test suite dashboard didn't come up -- check the Test Suite card's log.");
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    refresh();
   }
 }
 

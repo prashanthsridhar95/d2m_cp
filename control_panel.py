@@ -46,6 +46,13 @@ WEDLOCK_IAM_DIR = WEDLOCK_ROOT_DIR / "WedLockIAM" / "wedlock_iam"
 WEDLOCK_EMAIL_OTP_DIR = WEDLOCK_ROOT_DIR / "email_otp"
 WEDLOCK_OTP_GATEWAY_DIR = WEDLOCK_ROOT_DIR / "otp_gateway"
 
+# d2m_testsuite -- the regression/smoke/sanity/e2e suite. Its own local
+# dashboard (tools/dashboard.py) is managed here like any other service so
+# the GUI is one click from the Control Panel; it is not watchdog-healed or
+# part of "start everything" since it's an on-demand tool, not part of the app.
+TESTSUITE_DIR = Path(os.path.expanduser("~/Desktop/d2m_testsuite"))
+TESTSUITE_PORT = 8770
+
 BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
 MESSAGING_PORT = 4000
@@ -59,6 +66,7 @@ MESSAGING_URL = f"http://127.0.0.1:{MESSAGING_PORT}"
 WEDLOCK_IAM_URL = f"http://127.0.0.1:{WEDLOCK_IAM_PORT}"
 WEDLOCK_EMAIL_OTP_URL = f"http://127.0.0.1:{WEDLOCK_EMAIL_OTP_PORT}"
 WEDLOCK_OTP_GATEWAY_URL = f"http://127.0.0.1:{WEDLOCK_OTP_GATEWAY_PORT}"
+TESTSUITE_URL = f"http://127.0.0.1:{TESTSUITE_PORT}"
 
 LOG_DIR = Path(os.path.expanduser("~/Library/Application Support/D2MControlPanel/logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -431,6 +439,7 @@ messaging = ManagedService("messaging", MESSAGING_PORT, f"{MESSAGING_URL}/health
 wedlock_iam = ManagedService("wedlock_iam", WEDLOCK_IAM_PORT, f"{WEDLOCK_IAM_URL}/health", _wedlock_iam_health_ok)
 wedlock_email_otp = ManagedService("wedlock_email_otp", WEDLOCK_EMAIL_OTP_PORT, f"{WEDLOCK_EMAIL_OTP_URL}/api/v1/health", _wedlock_email_otp_health_ok)
 wedlock_otp_gateway = ManagedService("wedlock_otp_gateway", WEDLOCK_OTP_GATEWAY_PORT, f"{WEDLOCK_OTP_GATEWAY_URL}/health", _wedlock_otp_gateway_health_ok)
+testsuite = ManagedService("testsuite", TESTSUITE_PORT, f"{TESTSUITE_URL}/health")
 # Health-checked via cloudflared's own --metrics /ready endpoint, which only
 # returns 200 once the tunnel has an actual established connection to
 # Cloudflare's edge -- a real "is this thing working" signal, not just
@@ -1193,6 +1202,9 @@ WATCHDOG_MAX_CONSECUTIVE_RESTARTS = 5
 
 _watchdog_failure_counts: dict[str, int] = {}
 
+def testsuite_start_cmd() -> list[str]:
+    return [_venv_python(TESTSUITE_DIR), "tools/dashboard.py", "--port", str(TESTSUITE_PORT)]
+
 
 def _watchdog_targets() -> list[tuple[ManagedService, list[str], Path]]:
     """Recomputed on every tick (rather than a static list) so the frontend
@@ -1725,11 +1737,12 @@ class Handler(BaseHTTPRequestHandler):
                 "wedlock_iam": wedlock_iam.status(),
                 "wedlock_email_otp": wedlock_email_otp.status(),
                 "wedlock_otp_gateway": wedlock_otp_gateway.status(),
+                "testsuite": testsuite.status(),
                 "activity": activity_copy,
                 "paths": {
                     "backend": str(BACKEND_DIR), "frontend": str(FRONTEND_DIR), "messaging": str(MESSAGING_DIR),
                     "wedlock_iam": str(WEDLOCK_IAM_DIR), "wedlock_email_otp": str(WEDLOCK_EMAIL_OTP_DIR),
-                    "wedlock_otp_gateway": str(WEDLOCK_OTP_GATEWAY_DIR),
+                    "wedlock_otp_gateway": str(WEDLOCK_OTP_GATEWAY_DIR), "testsuite": str(TESTSUITE_DIR),
                 },
                 "public": {"app": PUBLIC_HOSTNAME_APP, "api": PUBLIC_HOSTNAME_API, "msg": PUBLIC_HOSTNAME_MSG},
             })
@@ -1807,6 +1820,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"message": wedlock_otp_gateway.start(wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR)})
         if self.path == "/api/wedlock_otp_gateway/stop":
             return self._json({"message": wedlock_otp_gateway.stop()})
+        if self.path == "/api/testsuite/start":
+            return self._json({"message": testsuite.start(testsuite_start_cmd(), TESTSUITE_DIR)})
+        if self.path == "/api/testsuite/stop":
+            return self._json({"message": testsuite.stop()})
+        if self.path == "/api/testsuite/restart":
+            return self._json({"message": testsuite.restart(testsuite_start_cmd(), TESTSUITE_DIR)})
         if self.path == "/api/wedlock_otp_gateway/restart":
             return self._json({"message": wedlock_otp_gateway.restart(wedlock_otp_gateway_start_cmd(), WEDLOCK_OTP_GATEWAY_DIR)})
 
